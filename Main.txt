@@ -1,0 +1,2085 @@
+-- By Zyronis
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService = game:GetService("UserInputService")
+
+local player = Players.LocalPlayer
+local character = player.Character or player.CharacterAdded:Wait()
+local humanoid = character:WaitForChild("Humanoid")
+local mouse = player:GetMouse()
+
+local EmoteIDs = {
+    idle = "130091513634214",
+    walk = "102256275785620",
+    run = "121350640829746",
+    jump = "104108770420406"
+}
+
+local Settings = {
+    ["Stop On Move"] = false,
+    ["Fade In"] = 0.2,
+    ["Fade Out"] = 0.2,
+    ["Weight"] = 1,
+    ["Speed"] = 1,
+    ["Time Position"] = 0
+}
+
+local CurrentTracks = {}
+local lastState = "idle"
+local stateTime = 0
+local isSystemActive = false
+local deathConnection = nil
+
+local function stopAllAnimations()
+    -- Para TODAS as animações do humanoid
+    if humanoid then
+        local animator = humanoid:FindFirstChildOfClass("Animator")
+        if animator then
+            for _, track in pairs(animator:GetPlayingAnimationTracks()) do
+                track:Stop(0)
+            end
+        end
+    end
+    
+    -- Limpa as tracks do sistema
+    for trackName, track in pairs(CurrentTracks) do
+        if track then
+            pcall(function()
+                track:Stop(0)
+                track:Destroy()
+            end)
+        end
+    end
+    CurrentTracks = {}
+end
+
+local function cleanupTracks()
+    for trackName, track in pairs(CurrentTracks) do
+        if track then
+            pcall(function()
+                track:Stop(0)
+                track:Destroy()
+            end)
+        end
+    end
+    CurrentTracks = {}
+end
+
+local function onDeath()
+    -- Para TUDO imediatamente
+    isSystemActive = false
+    stopAllAnimations()
+    lastState = "idle"
+    stateTime = 0
+end
+
+local function setupDeathDetection()
+    -- Remove conexão antiga se existir
+    if deathConnection then
+        deathConnection:Disconnect()
+        deathConnection = nil
+    end
+    
+    -- Detecta quando o humanoid morre
+    if humanoid then
+        deathConnection = humanoid.Died:Connect(function()
+            onDeath()
+        end)
+    end
+end
+
+local function LoadEmoteTrack(id, trackName)
+    if not isSystemActive then return nil end
+    if not humanoid or not humanoid.Parent then return nil end
+    
+    if CurrentTracks[trackName] then 
+        CurrentTracks[trackName]:Stop(Settings["Fade Out"]) 
+        CurrentTracks[trackName] = nil
+    end
+    
+    local animId
+    local ok, result = pcall(function() 
+        return game:GetObjects("rbxassetid://" .. tostring(id)) 
+    end)
+    
+    if ok and result and #result > 0 then
+        local anim = result[1]
+        if anim:IsA("Animation") then
+            animId = anim.AnimationId
+        else
+            animId = "rbxassetid://" .. tostring(id)
+        end
+    else
+        animId = "rbxassetid://" .. tostring(id)
+    end
+    
+    local newAnim = Instance.new("Animation")
+    newAnim.AnimationId = animId
+    newAnim.Name = "EmoteMovement_" .. trackName
+    
+    local newTrack = humanoid:LoadAnimation(newAnim)
+    newTrack.Priority = Enum.AnimationPriority.Action4
+    
+    local weight = Settings["Weight"]
+    if weight == 0 then weight = 0.001 end
+    
+    newTrack:Play(Settings["Fade In"], weight, Settings["Speed"])
+    newTrack.TimePosition = math.clamp(Settings["Time Position"], 0, 1) * newTrack.Length
+    newTrack.Looped = (trackName ~= "jump")
+    
+    CurrentTracks[trackName] = newTrack
+    
+    return newTrack
+end
+
+local function detectMovementState()
+    if not humanoid or not humanoid.Parent then return "idle" end
+    if humanoid.Health <= 0 then return "idle" end
+    
+    local moveDirection = humanoid.MoveDirection
+    local walkSpeed = humanoid.WalkSpeed
+    local jumpState = humanoid:GetState()
+    
+    if jumpState == Enum.HumanoidStateType.Jumping or 
+       jumpState == Enum.HumanoidStateType.Freefall then
+        return "jump"
+    elseif moveDirection.Magnitude > 0.1 then
+        if walkSpeed >= 20 then
+            return "run"
+        else
+            return "walk"
+        end
+    else
+        return "idle"
+    end
+end
+
+local function updateEmoteMovement()
+    if not isSystemActive then return end
+    if not humanoid or not humanoid.Parent then return end
+    if humanoid.Health <= 0 then 
+        onDeath()
+        return 
+    end
+    
+    local currentTime = tick()
+    local newState = detectMovementState()
+    
+    if newState ~= lastState and (currentTime - stateTime) > 0.3 then
+        
+        if CurrentTracks[lastState] and CurrentTracks[lastState].IsPlaying then
+            CurrentTracks[lastState]:Stop(Settings["Fade Out"])
+        end
+        
+        if EmoteIDs[newState] then
+            LoadEmoteTrack(EmoteIDs[newState], newState)
+        end
+        
+        lastState = newState
+        stateTime = currentTime
+    end
+end
+
+local function replaceAnimateScript()
+    local success = false
+    
+    pcall(function()
+        local animate = character:FindFirstChild("Animate")
+        if animate then
+            if animate:FindFirstChild("idle") and animate.idle:FindFirstChild("Animation1") then
+                animate.idle.Animation1.AnimationId = "rbxassetid://" .. EmoteIDs.idle
+            end
+            if animate:FindFirstChild("walk") and animate.walk:FindFirstChild("WalkAnim") then
+                animate.walk.WalkAnim.AnimationId = "rbxassetid://" .. EmoteIDs.walk
+            end
+            if animate:FindFirstChild("run") and animate.run:FindFirstChild("RunAnim") then
+                animate.run.RunAnim.AnimationId = "rbxassetid://" .. EmoteIDs.run
+            end
+            if animate:FindFirstChild("jump") and animate.jump:FindFirstChild("JumpAnim") then
+                animate.jump.JumpAnim.AnimationId = "rbxassetid://" .. EmoteIDs.jump
+            end
+            
+            success = true
+        end
+    end)
+    
+    return success
+end
+
+local function startCustomTrackSystem()
+    if not humanoid or humanoid.Health <= 0 then return false end
+    
+    cleanupTracks()
+    lastState = "idle"
+    stateTime = tick()
+    
+    LoadEmoteTrack(EmoteIDs.idle, "idle")
+    isSystemActive = true
+    
+    return true
+end
+
+local function tryRemoteMethod()
+    local success = false
+    local remoteNames = {"Emote", "PlayEmote", "Animation", "SetAnimation"}
+    
+    for _, remoteName in ipairs(remoteNames) do
+        local remote = ReplicatedStorage:FindFirstChild(remoteName)
+        if remote then
+            for state, id in pairs(EmoteIDs) do
+                pcall(function()
+                    if remote:IsA("RemoteFunction") then
+                        remote:InvokeServer(tonumber(id))
+                    elseif remote:IsA("RemoteEvent") then
+                        remote:FireServer(tonumber(id))
+                    end
+                    success = true
+                end)
+                wait(0.2)
+            end
+        end
+    end
+    
+    return success
+end
+
+local function activateEmoteMovementSystem()
+    if not humanoid or humanoid.Health <= 0 then 
+        return false 
+    end
+    
+    local methods = {
+        {name = "Animate Script", func = replaceAnimateScript},
+        {name = "Sistema Custom", func = startCustomTrackSystem},
+        {name = "Remotes", func = tryRemoteMethod}
+    }
+    
+    local successCount = 0
+    
+    for i, method in ipairs(methods) do
+        local success = method.func()
+        if success then
+            successCount = successCount + 1
+        end
+        
+        wait(1)
+    end
+    
+    if successCount > 0 then
+        return true
+    else
+        return startCustomTrackSystem()
+    end
+end
+
+RunService.Heartbeat:Connect(function()
+    updateEmoteMovement()
+end)
+
+player.Chatted:Connect(function(message)
+    local msg = message:lower()
+    
+    if msg == "/start" or msg == "/ativar" then
+        activateEmoteMovementSystem()
+    elseif msg == "/stop" or msg == "/parar" then
+        isSystemActive = false
+        stopAllAnimations()
+    elseif msg == "/status" then
+        local status = isSystemActive and "ATIVO" or "INATIVO"
+    elseif msg:match("^/setid%s+(%w+)%s+(%d+)") then
+        local state, newId = msg:match("^/setid%s+(%w+)%s+(%d+)")
+        if EmoteIDs[state] then
+            EmoteIDs[state] = newId
+        end
+    end
+end)
+
+player.CharacterAdded:Connect(function(newCharacter)
+    -- PARA TUDO antes de trocar o character
+    onDeath()
+    
+    character = newCharacter
+    humanoid = newCharacter:WaitForChild("Humanoid")
+    
+    -- Configura detecção de morte para o novo character
+    setupDeathDetection()
+    
+    -- NÃO reativa automaticamente, só se o usuário usar /start
+    -- Se quiser que reative automaticamente, descomente a linha abaixo:
+    -- wait(3)
+    -- if isSystemActive then
+    --     activateEmoteMovementSystem()
+    -- end
+end)
+
+-- Setup inicial da detecção de morte
+setupDeathDetection()
+
+local function applyOutfit()
+    local Remotes = ReplicatedStorage:WaitForChild("Remotes")
+    
+    wait(1)
+    
+    local bodyCommands = {
+        {remote = "ChangeCharacterBody", args = {{376532000, 376531012, 376530220, 376531703, 376531300, 0}}},
+        {remote = "ChangeBodyColor", args = {"Medium stone grey"}, isEvent = true}
+    }
+    
+    for _, command in ipairs(bodyCommands) do
+        pcall(function()
+            local remote = Remotes:FindFirstChild(command.remote)
+            if remote then
+                if command.isEvent then
+                    remote:FireServer(unpack(command.args))
+                else
+                    remote:InvokeServer(unpack(command.args))
+                end
+            end
+        end)
+        wait(0.15)
+    end
+    
+    wait(1)
+    
+    local accessoriesCommands = {
+        {remote = "WearBundle", args = {113642670777565}},
+        {remote = "Wear", args = {1090133099}},
+        {remote = "Wear", args = {117689066408775}},
+        {remote = "Wear", args = {125840789428722}},
+        {remote = "Wear", args = {12332334048}},
+        {remote = "Wear", args = {15288967733}},
+        {remote = "Wear", args = {80849889471090}},
+        {remote = "Wear", args = {13935777037}},
+        {remote = "Wear", args = {6093228421}},
+        {remote = "Wear", args = {6006342436}},
+        {remote = "Wear", args = {18386106075}},
+        {remote = "Wear", args = {0}},
+        {remote = "Wear", args = {382538503}},
+        {remote = "Wear", args = {607785314}},
+        {remote = "Wear", args = {607702162}}
+    }
+    
+    for _, command in ipairs(accessoriesCommands) do
+        pcall(function()
+            local remote = Remotes:FindFirstChild(command.remote)
+            if remote then
+                if command.isEvent then
+                    remote:FireServer(unpack(command.args))
+                else
+                    remote:InvokeServer(unpack(command.args))
+                end
+            end
+        end)
+        wait(0.15)
+    end
+    
+    wait(5)
+    
+    local clothingCommands = {
+        {remote = "WearPants", args = {103546767859935}},
+        {remote = "WearShirt", args = {12081446793}}
+    }
+    
+    for _, command in ipairs(clothingCommands) do
+        pcall(function()
+            local remote = Remotes:FindFirstChild(command.remote)
+            if remote then
+                remote:InvokeServer(unpack(command.args))
+            end
+        end)
+        wait(0.2)
+    end
+end
+
+local FlySpeed = 50
+local FlyEmoteIDs = {
+    idle = "142789213909857",
+    side = "88433836073996",
+    flying = "102256275785620"
+}
+
+local FlySettings = {
+    ["Stop On Move"] = false,
+    ["Fade In"] = 0.2,
+    ["Fade Out"] = 0.2,
+    ["Weight"] = 1,
+    ["Speed"] = 1,
+    ["Time Position"] = 0
+}
+
+local CurrentFlyTracks = {}
+local lastFlyState = "idle"
+local flyStateTime = 0
+local isFlySystemActive = false
+
+local function LoadFlyEmoteTrack(id, trackName)
+    if CurrentFlyTracks[trackName] then 
+        CurrentFlyTracks[trackName]:Stop(FlySettings["Fade Out"]) 
+        CurrentFlyTracks[trackName] = nil
+    end
+    
+    local animId
+    local ok, result = pcall(function() 
+        return game:GetObjects("rbxassetid://" .. tostring(id)) 
+    end)
+    
+    if ok and result and #result > 0 then
+        local anim = result[1]
+        if anim:IsA("Animation") then
+            animId = anim.AnimationId
+        else
+            animId = "rbxassetid://" .. tostring(id)
+        end
+    else
+        animId = "rbxassetid://" .. tostring(id)
+    end
+    
+    local currentHumanoid = player.Character:FindFirstChild("Humanoid")
+    if not currentHumanoid then return end
+    
+    local newAnim = Instance.new("Animation")
+    newAnim.AnimationId = animId
+    newAnim.Name = "FlyEmote_" .. trackName
+    
+    local newTrack = currentHumanoid:LoadAnimation(newAnim)
+    newTrack.Priority = Enum.AnimationPriority.Action4
+    
+    local weight = FlySettings["Weight"]
+    if weight == 0 then weight = 0.001 end
+    
+    newTrack:Play(FlySettings["Fade In"], weight, FlySettings["Speed"])
+    newTrack.TimePosition = math.clamp(FlySettings["Time Position"], 0, 1) * newTrack.Length
+    newTrack.Looped = true
+    
+    CurrentFlyTracks[trackName] = newTrack
+    
+    return newTrack
+end
+
+local function detectFlyState(ctrl, speed)
+    local moving = ctrl.l + ctrl.r ~= 0 or ctrl.f + ctrl.b ~= 0
+    
+    if not moving or speed < 5 then
+        return "idle"
+    end
+    
+    if (ctrl.l ~= 0 or ctrl.r ~= 0) and ctrl.f == 0 and ctrl.b == 0 then
+        return "side"
+    end
+    
+    if ctrl.f ~= 0 or ctrl.b ~= 0 then
+        return "flying"
+    end
+    
+    return "idle"
+end
+
+local function updateFlyEmoteMovement(ctrl, speed)
+    if not isFlySystemActive then return end
+    
+    local currentTime = tick()
+    local newState = detectFlyState(ctrl, speed)
+    
+    if newState ~= lastFlyState and (currentTime - flyStateTime) > 0.3 then
+        if CurrentFlyTracks[lastFlyState] and CurrentFlyTracks[lastFlyState].IsPlaying then
+            CurrentFlyTracks[lastFlyState]:Stop(FlySettings["Fade Out"])
+        end
+        
+        if FlyEmoteIDs[newState] then
+            LoadFlyEmoteTrack(FlyEmoteIDs[newState], newState)
+        end
+        
+        lastFlyState = newState
+        flyStateTime = currentTime
+    end
+end
+
+local function replaceFlyAnimateScript()
+    local success = false
+    
+    pcall(function()
+        local currentCharacter = player.Character
+        local currentHumanoid = currentCharacter:FindFirstChild("Humanoid")
+        local animate = currentCharacter:FindFirstChild("Animate")
+        
+        if animate and currentHumanoid then
+            if animate:FindFirstChild("idle") and animate.idle:FindFirstChild("Animation1") then
+                animate.idle.Animation1.AnimationId = "rbxassetid://" .. FlyEmoteIDs.idle
+            end
+            if animate:FindFirstChild("walk") and animate.walk:FindFirstChild("WalkAnim") then
+                animate.walk.WalkAnim.AnimationId = "rbxassetid://" .. FlyEmoteIDs.flying
+            end
+            if animate:FindFirstChild("run") and animate.run:FindFirstChild("RunAnim") then
+                animate.run.RunAnim.AnimationId = "rbxassetid://" .. FlyEmoteIDs.flying
+            end
+            
+            success = true
+        end
+    end)
+    
+    return success
+end
+
+local function startFlyCustomTrackSystem()
+    local currentHumanoid = player.Character:FindFirstChild("Humanoid")
+    if not currentHumanoid then return false end
+    
+    LoadFlyEmoteTrack(FlyEmoteIDs.idle, "idle")
+    isFlySystemActive = true
+    
+    return true
+end
+
+local function tryFlyRemoteMethod()
+    local success = false
+    local remoteNames = {"Emote", "PlayEmote", "Animation", "SetAnimation"}
+    
+    for _, remoteName in ipairs(remoteNames) do
+        local remote = ReplicatedStorage:FindFirstChild(remoteName)
+        if remote then
+            for state, id in pairs(FlyEmoteIDs) do
+                pcall(function()
+                    if remote:IsA("RemoteFunction") then
+                        remote:InvokeServer(tonumber(id))
+                    elseif remote:IsA("RemoteEvent") then
+                        remote:FireServer(tonumber(id))
+                    end
+                    success = true
+                end)
+                wait(0.2)
+            end
+        end
+    end
+    
+    return success
+end
+
+local function activateFlyEmoteSystem()
+    local methods = {
+        {name = "Animate Script", func = replaceFlyAnimateScript},
+        {name = "Sistema Custom", func = startFlyCustomTrackSystem},
+        {name = "Remotes", func = tryFlyRemoteMethod}
+    }
+    
+    local successCount = 0
+    
+    for i, method in ipairs(methods) do
+        local success = method.func()
+        if success then
+            successCount = successCount + 1
+        end
+        
+        wait(0.5)
+    end
+    
+    if successCount > 0 then
+        return true
+    else
+        return startFlyCustomTrackSystem()
+    end
+end
+
+local function stopFlyEmoteSystem()
+    isFlySystemActive = false
+    for _, track in pairs(CurrentFlyTracks) do
+        if track and track.IsPlaying then
+            track:Stop(0.3)
+        end
+    end
+    CurrentFlyTracks = {}
+    lastFlyState = "idle"
+end
+
+local guiOpen = false
+
+local function createFlyGUI()
+    if game.CoreGui:FindFirstChild("FlyGUI") then return end
+    
+    local ScreenGui = Instance.new("ScreenGui")
+    local Fly_Button = Instance.new("TextButton")
+    local FlySpeed_Button = Instance.new("TextButton")
+    local FlySpeed_Input = Instance.new("TextBox")
+    local Fly_Pad = Instance.new("ImageButton")
+
+    ScreenGui.Name = "FlyGUI"
+    ScreenGui.Parent = game.CoreGui
+    ScreenGui.ResetOnSpawn = false
+
+    Fly_Button.Name = "Fly_Button"
+    Fly_Button.Parent = ScreenGui
+    Fly_Button.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    Fly_Button.BorderSizePixel = 2
+    Fly_Button.BorderColor3 = Color3.fromRGB(0, 0, 0)
+    Fly_Button.Position = UDim2.new(0.5, -75, 0.1, 0)
+    Fly_Button.Size = UDim2.new(0, 150, 0, 40)
+    Fly_Button.Font = Enum.Font.GothamBold
+    Fly_Button.Text = "Fly [OFF]"
+    Fly_Button.TextColor3 = Color3.fromRGB(0, 0, 0)
+    Fly_Button.TextScaled = true
+
+    FlySpeed_Button.Name = "FlySpeed_Button"
+    FlySpeed_Button.Parent = ScreenGui
+    FlySpeed_Button.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    FlySpeed_Button.BorderSizePixel = 2
+    FlySpeed_Button.BorderColor3 = Color3.fromRGB(0, 0, 0)
+    FlySpeed_Button.Position = UDim2.new(0.5, -75, 0.15, 0)
+    FlySpeed_Button.Size = UDim2.new(0, 70, 0, 30)
+    FlySpeed_Button.Font = Enum.Font.GothamBold
+    FlySpeed_Button.Text = "Set Speed"
+    FlySpeed_Button.TextColor3 = Color3.fromRGB(0, 0, 0)
+    FlySpeed_Button.TextScaled = true
+
+    FlySpeed_Input.Name = "FlySpeed_Input"
+    FlySpeed_Input.Parent = ScreenGui
+    FlySpeed_Input.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    FlySpeed_Input.BorderSizePixel = 2
+    FlySpeed_Input.BorderColor3 = Color3.fromRGB(0, 0, 0)
+    FlySpeed_Input.Position = UDim2.new(0.5, 0, 0.15, 0)
+    FlySpeed_Input.Size = UDim2.new(0, 75, 0, 30)
+    FlySpeed_Input.Font = Enum.Font.Gotham
+    FlySpeed_Input.PlaceholderText = "Speed"
+    FlySpeed_Input.Text = ""
+    FlySpeed_Input.TextColor3 = Color3.fromRGB(0, 0, 0)
+    FlySpeed_Input.TextSize = 14
+
+    Fly_Pad.Name = "Fly_Pad"
+    Fly_Pad.Parent = ScreenGui
+    Fly_Pad.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    Fly_Pad.BackgroundTransparency = 0
+    Fly_Pad.BorderSizePixel = 2
+    Fly_Pad.BorderColor3 = Color3.fromRGB(0, 0, 0)
+    Fly_Pad.Position = UDim2.new(0.1, 0, 0.6, 0)
+    Fly_Pad.Size = UDim2.new(0, 100, 0, 100)
+    Fly_Pad.ZIndex = 2
+    Fly_Pad.Image = "rbxassetid://6764432293"
+    Fly_Pad.ImageRectOffset = Vector2.new(713, 315)
+    Fly_Pad.ImageRectSize = Vector2.new(75, 75)
+    Fly_Pad.ImageColor3 = Color3.fromRGB(0, 0, 0)
+    Fly_Pad.Visible = false
+
+    local FlyWButton = Instance.new("TextButton")
+    local FlySButton = Instance.new("TextButton")
+    local FlyAButton = Instance.new("TextButton")
+    local FlyDButton = Instance.new("TextButton")
+
+    FlyWButton.Name = "FlyWButton"
+    FlyWButton.Parent = Fly_Pad
+    FlyWButton.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    FlyWButton.BackgroundTransparency = 1.000
+    FlyWButton.Position = UDim2.new(0, 30, 0, 0)
+    FlyWButton.Size = UDim2.new(0, 40, 0, 30)
+    FlyWButton.Font = Enum.Font.Oswald
+    FlyWButton.Text = ""
+    FlyWButton.ZIndex = 3
+
+    FlySButton.Name = "FlySButton"
+    FlySButton.Parent = Fly_Pad
+    FlySButton.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    FlySButton.BackgroundTransparency = 1.000
+    FlySButton.Position = UDim2.new(0, 30, 0, 70)
+    FlySButton.Size = UDim2.new(0, 40, 0, 30)
+    FlySButton.Font = Enum.Font.Oswald
+    FlySButton.Text = ""
+    FlySButton.ZIndex = 3
+
+    FlyAButton.Name = "FlyAButton"
+    FlyAButton.Parent = Fly_Pad
+    FlyAButton.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    FlyAButton.BackgroundTransparency = 1.000
+    FlyAButton.Position = UDim2.new(0, 0, 0, 30)
+    FlyAButton.Size = UDim2.new(0, 30, 0, 40)
+    FlyAButton.Font = Enum.Font.Oswald
+    FlyAButton.Text = ""
+    FlyAButton.ZIndex = 3
+
+    FlyDButton.Name = "FlyDButton"
+    FlyDButton.Parent = Fly_Pad
+    FlyDButton.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    FlyDButton.BackgroundTransparency = 1.000
+    FlyDButton.Position = UDim2.new(0, 70, 0, 30)
+    FlyDButton.Size = UDim2.new(0, 30, 0, 40)
+    FlyDButton.Font = Enum.Font.Oswald
+    FlyDButton.Text = ""
+    FlyDButton.ZIndex = 3
+
+    local flying = false
+    local ctrl = {f = 0, b = 0, l = 0, r = 0}
+    local lastctrl = {f = 0, b = 0, l = 0, r = 0}
+    local KeyDownFunction = nil
+    local KeyUpFunction = nil
+    local buttonConnections = {}
+
+    Fly_Button.MouseButton1Click:Connect(function()
+        if not flying then
+            flying = true
+            Fly_Button.Text = "Fly [ON]"
+            Fly_Button.BackgroundColor3 = Color3.fromRGB(200, 255, 200)
+            Fly_Pad.Visible = true
+            
+            activateFlyEmoteSystem()
+            
+            local UpperTorso = player.Character.UpperTorso
+            local speed = 0
+            
+            local function Fly()
+                local bg = Instance.new("BodyGyro", UpperTorso)
+                bg.P = 9e4
+                bg.maxTorque = Vector3.new(9e9, 9e9, 9e9)
+                bg.cframe = UpperTorso.CFrame
+                
+                local bv = Instance.new("BodyVelocity", UpperTorso)
+                bv.velocity = Vector3.new(0, 0.1, 0)
+                bv.maxForce = Vector3.new(9e9, 9e9, 9e9)
+                
+                repeat 
+                    task.wait()
+                    player.Character.Humanoid.PlatformStand = true
+                    
+                    local moving = ctrl.l + ctrl.r ~= 0 or ctrl.f + ctrl.b ~= 0
+                    
+                    if moving then
+                        speed = speed + FlySpeed * 0.10
+                        if speed > FlySpeed then
+                            speed = FlySpeed
+                        end
+                    elseif not moving and speed ~= 0 then
+                        speed = speed - FlySpeed * 0.10
+                        if speed < 0 then
+                            speed = 0
+                        end
+                    end
+                    
+                    updateFlyEmoteMovement(ctrl, speed)
+                    
+                    if (ctrl.l + ctrl.r) ~= 0 or (ctrl.f + ctrl.b) ~= 0 then
+                        bv.velocity = ((game.Workspace.CurrentCamera.CoordinateFrame.lookVector * (ctrl.f + ctrl.b)) + 
+                            ((game.Workspace.CurrentCamera.CoordinateFrame * CFrame.new(ctrl.l + ctrl.r, (ctrl.f + ctrl.b) * .2, 0).p) - 
+                            game.Workspace.CurrentCamera.CoordinateFrame.p)) * speed
+                        lastctrl = {f = ctrl.f, b = ctrl.b, l = ctrl.l, r = ctrl.r}
+                    elseif (ctrl.l + ctrl.r) == 0 and (ctrl.f + ctrl.b) == 0 and speed ~= 0 then
+                        bv.velocity = ((game.Workspace.CurrentCamera.CoordinateFrame.lookVector * (lastctrl.f + lastctrl.b)) + 
+                            ((game.Workspace.CurrentCamera.CoordinateFrame * CFrame.new(lastctrl.l + lastctrl.r, (lastctrl.f + lastctrl.b) * .2, 0).p) - 
+                            game.Workspace.CurrentCamera.CoordinateFrame.p)) * speed
+                    else
+                        bv.velocity = Vector3.new(0, 0.1, 0)
+                    end
+                    
+                    bg.cframe = game.Workspace.CurrentCamera.CoordinateFrame * CFrame.Angles(-math.rad((ctrl.f + ctrl.b) * 50 * speed / FlySpeed), 0, 0)
+                until not flying
+                
+                ctrl = {f = 0, b = 0, l = 0, r = 0}
+                lastctrl = {f = 0, b = 0, l = 0, r = 0}
+                speed = 0
+                bg:Destroy()
+                bv:Destroy()
+                player.Character.Humanoid.PlatformStand = false
+            end
+
+            KeyDownFunction = mouse.KeyDown:connect(function(key)
+                if key:lower() == "w" then
+                    ctrl.f = 1
+                elseif key:lower() == "s" then
+                    ctrl.b = -1
+                elseif key:lower() == "a" then
+                    ctrl.l = -1
+                elseif key:lower() == "d" then
+                    ctrl.r = 1
+                end
+            end)
+
+            KeyUpFunction = mouse.KeyUp:connect(function(key)
+                if key:lower() == "w" then
+                    ctrl.f = 0
+                elseif key:lower() == "s" then
+                    ctrl.b = 0
+                elseif key:lower() == "a" then
+                    ctrl.l = 0
+                elseif key:lower() == "d" then
+                    ctrl.r = 0
+                end
+            end)
+            
+            table.insert(buttonConnections, FlyWButton.MouseButton1Down:Connect(function() ctrl.f = 1 end))
+            table.insert(buttonConnections, FlyWButton.MouseButton1Up:Connect(function() ctrl.f = 0 end))
+            table.insert(buttonConnections, FlySButton.MouseButton1Down:Connect(function() ctrl.b = -1 end))
+            table.insert(buttonConnections, FlySButton.MouseButton1Up:Connect(function() ctrl.b = 0 end))
+            table.insert(buttonConnections, FlyAButton.MouseButton1Down:Connect(function() ctrl.l = -1 end))
+            table.insert(buttonConnections, FlyAButton.MouseButton1Up:Connect(function() ctrl.l = 0 end))
+            table.insert(buttonConnections, FlyDButton.MouseButton1Down:Connect(function() ctrl.r = 1 end))
+            table.insert(buttonConnections, FlyDButton.MouseButton1Up:Connect(function() ctrl.r = 0 end))
+            
+            Fly()
+        else
+            flying = false
+            Fly_Button.Text = "Fly [OFF]"
+            Fly_Button.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+            Fly_Pad.Visible = false
+            
+            if KeyDownFunction then KeyDownFunction:Disconnect() end
+            if KeyUpFunction then KeyUpFunction:Disconnect() end
+            
+            for _, connection in pairs(buttonConnections) do
+                connection:Disconnect()
+            end
+            buttonConnections = {}
+            
+            stopFlyEmoteSystem()
+        end
+    end)
+
+    FlySpeed_Button.MouseButton1Click:Connect(function()
+        pcall(function()
+            local Speed = FlySpeed_Input.Text:gsub("%D", "")
+            if Speed == "" then Speed = 50 end
+            FlySpeed = tonumber(Speed)
+        end)
+    end)
+end
+
+local tool = Instance.new("Tool")
+tool.Name = "FLY ANGEL"
+tool.RequiresHandle = false
+tool.Parent = player.Backpack
+
+tool.Activated:Connect(function()
+    if guiOpen then
+        if game.CoreGui:FindFirstChild("FlyGUI") then
+            game.CoreGui.FlyGUI:Destroy()
+        end
+        guiOpen = false
+    else
+        createFlyGUI()
+        guiOpen = true
+    end
+end)
+
+wait(3)
+applyOutfit()
+wait(3)
+activateEmoteMovementSystem()
+
+game:GetService("StarterGui"):SetCore("SendNotification",{
+    Title = "Sword Angel Carregado",
+    Text = "Made by Shad0ws - Sound System",
+    Button1 = "ok",
+    Button2 = "-",
+    Duration = 30
+})
+
+wait(1)
+
+-- Services
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+local LocalPlayer = Players.LocalPlayer
+
+-- Variables
+local buggedPlayers = {}
+local bugConnections = {}
+local bugTimers = {}
+local Remote = ReplicatedStorage.RE:FindFirstChild("1Gu1n")
+local currentAnimationTrack = nil
+local isAttacking = false
+local appearanceEquipped = false -- Flag para equipar aparência apenas uma vez
+
+-- ======================
+-- SISTEMA DE SOM + ANIMAÇÃO SINCRONIZADO
+-- ======================
+local ATTACK_SOUND_ID = 7118966167
+local ATTACK_ANIMATION_ID = "83509299779732"
+
+-- Configurações de sincronização
+local Settings = {
+    ["Stop On Move"] = true,
+    ["Fade In"] = 0.1,
+    ["Fade Out"] = 0.1,
+    ["Weight"] = 1,
+    ["Speed"] = 2,
+    ["Time Position"] = 0
+}
+
+local function PlayServerAudio(ID)
+    if type(ID) ~= "number" then return end
+    local ev = ReplicatedStorage:FindFirstChild("RE")
+    if ev and ev:FindFirstChild("1Gu1nSound1s") then
+        ev["1Gu1nSound1s"]:FireServer(Workspace, ID, 1)
+    end
+end
+
+local function PlayLocalAudio(ID)
+    if type(ID) ~= "number" then return end
+    
+    local char = LocalPlayer.Character
+    if not char then return end
+    
+    local sound = Instance.new("Sound")
+    sound.SoundId = "rbxassetid://" .. ID
+    sound.Volume = 1
+    sound.Parent = char:FindFirstChild("HumanoidRootPart") or char:WaitForChild("Head")
+    sound:Play()
+    
+    sound.Ended:Connect(function()
+        sound:Destroy()
+    end)
+    
+    task.delay(10, function()
+        if sound and sound.Parent then
+            sound:Destroy()
+        end
+    end)
+    
+    return sound
+end
+
+local function PlayAttackSound()
+    PlayServerAudio(ATTACK_SOUND_ID)
+    return PlayLocalAudio(ATTACK_SOUND_ID)
+end
+
+-- Sistema de detecção de movimento
+local lastPosition = Vector3.new()
+local character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+local humanoid = character:WaitForChild("Humanoid")
+
+LocalPlayer.CharacterAdded:Connect(function(newCharacter)
+    character = newCharacter
+    humanoid = newCharacter:WaitForChild("Humanoid")
+    if character.PrimaryPart then
+        lastPosition = character.PrimaryPart.Position
+    end
+end)
+
+-- Parar animação ao se mover
+RunService.RenderStepped:Connect(function()
+    if character and character.PrimaryPart then
+        if Settings["Stop On Move"] and currentAnimationTrack and currentAnimationTrack.IsPlaying then
+            local moved = (character.PrimaryPart.Position - lastPosition).Magnitude > 0.1
+            local jumped = humanoid and humanoid:GetState() == Enum.HumanoidStateType.Jumping
+            
+            if moved or jumped then
+                currentAnimationTrack:Stop(Settings["Fade Out"])
+                currentAnimationTrack = nil
+                isAttacking = false
+            end
+        end
+        lastPosition = character.PrimaryPart.Position
+    end
+end)
+
+local function LoadAndPlayAttackAnimation()
+    if not character or not character:FindFirstChild("Humanoid") then return end
+    
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return end
+    
+    if currentAnimationTrack then
+        currentAnimationTrack:Stop(Settings["Fade Out"])
+        currentAnimationTrack = nil
+    end
+    
+    local newAnim = Instance.new("Animation")
+    newAnim.AnimationId = "rbxassetid://" .. ATTACK_ANIMATION_ID
+    
+    local newTrack = humanoid:LoadAnimation(newAnim)
+    newTrack.Priority = Enum.AnimationPriority.Action4
+    newTrack.Looped = false
+    
+    local weight = Settings["Weight"]
+    if weight == 0 then weight = 0.001 end
+    
+    newTrack:Play(Settings["Fade In"], weight, Settings["Speed"])
+    currentAnimationTrack = newTrack
+    currentAnimationTrack.TimePosition = math.clamp(Settings["Time Position"], 0, 1) * currentAnimationTrack.Length
+    
+    currentAnimationTrack.Stopped:Connect(function()
+        currentAnimationTrack = nil
+        isAttacking = false
+    end)
+    
+    task.delay(1.5, function()
+        if currentAnimationTrack == newTrack then
+            newTrack:Stop(Settings["Fade Out"])
+            currentAnimationTrack = nil
+            isAttacking = false
+        end
+    end)
+    
+    return newTrack
+end
+
+local function PerformAttack()
+    if isAttacking then return end
+    
+    isAttacking = true
+    
+    -- 🛑 PARAR ANIMAÇÕES DO SISTEMA DE EMOTES
+    pcall(function()
+        local emoteScript = LocalPlayer.PlayerScripts:FindFirstChild("EmoteMovementSystem")
+        if emoteScript then
+            -- Tentar parar via variável global
+            if getgenv then
+                getgenv().isSystemActive = false
+            end
+        end
+        
+        -- Parar todas as animações de emote ativas
+        if character and character:FindFirstChild("Humanoid") then
+            local humanoid = character.Humanoid
+            for _, track in pairs(humanoid:GetPlayingAnimationTracks()) do
+                if track.Name and (
+                    track.Name:match("EmoteMovement_") or 
+                    track.Name:match("FlyEmote_")
+                ) then
+                    track:Stop(0.1)
+                end
+            end
+        end
+    end)
+    
+    PlayAttackSound()
+    LoadAndPlayAttackAnimation()
+    
+    task.delay(0.8, function()
+        isAttacking = false
+        
+        -- 🔄 REATIVAR SISTEMA DE EMOTES APÓS ATAQUE
+        pcall(function()
+            if getgenv then
+                getgenv().isSystemActive = true
+            end
+        end)
+    end)
+end
+
+-- ======================
+-- TOOL SETUP
+-- ======================
+local tool = Instance.new("Tool")
+tool.Name = "Sword Angel"
+tool.RequiresHandle = true
+tool.CanBeDropped = true
+
+local handle = Instance.new("Part")
+handle.Name = "Handle"
+handle.Size = Vector3.new(0.1, 0.1, 0.1)
+handle.Massless = true
+handle.Anchored = false
+handle.CanCollide = false
+handle.Transparency = 0.5
+handle.Color = Color3.fromRGB(255, 0, 0)
+
+local mesh = Instance.new("SpecialMesh", handle)
+mesh.MeshType = Enum.MeshType.Sphere
+mesh.Scale = Vector3.new(0.05, 0.05, 0.05)
+mesh.Parent = handle
+
+handle.Parent = tool
+
+local function createNotification(title, message)
+    game:GetService("StarterGui"):SetCore("SendNotification",{
+        Title = title,
+        Text = message,
+        Duration = 3
+    })
+end
+
+-- ======================
+-- NOVO SISTEMA DE BUG (15 SEGUNDOS + AUTO-STOP MELHORADO)
+-- ======================
+local function stopBugForPlayer(playerName)
+    if bugConnections[playerName] then
+        bugConnections[playerName]:Disconnect()
+        bugConnections[playerName] = nil
+    end
+    
+    if bugTimers[playerName] then
+        pcall(function()
+            task.cancel(bugTimers[playerName])
+        end)
+        bugTimers[playerName] = nil
+    end
+    
+    buggedPlayers[playerName] = nil
+end
+
+local function isPlayerInVoidOrSky(targetPlayer)
+    if not targetPlayer or not targetPlayer.Character then return true end
+    
+    local hrp = targetPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return true end
+    
+    local pos = hrp.Position
+    
+    -- Void (muito baixo)
+    if pos.Y < -100 then return true end
+    
+    -- Céu (muito alto)
+    if pos.Y > 1000 then return true end
+    
+    return false
+end
+
+local function bugPlayer(targetPlayer)
+    if not Remote then
+        createNotification("Erro", "Remote não encontrado!")
+        return
+    end
+    
+    if not targetPlayer or not targetPlayer.Character then
+        createNotification("Erro", "Player inválido!")
+        return
+    end
+    
+    local playerName = targetPlayer.Name
+    
+    -- Se já está bugado, parar o bug
+    if buggedPlayers[playerName] then
+        stopBugForPlayer(playerName)
+        createNotification("Bug Parado", playerName .. " foi desbugado!")
+        return
+    end
+    
+    -- Aplicar bug por 15 segundos
+    buggedPlayers[playerName] = true
+    createNotification("Ataque!", playerName .. " - Bug ativo por 15s")
+    
+    -- Timer de 15 segundos
+    local timerTask = task.spawn(function()
+        task.wait(15)
+        if buggedPlayers[playerName] then
+            stopBugForPlayer(playerName)
+            createNotification("Timeout", playerName .. " - Bug finalizado")
+        end
+    end)
+    bugTimers[playerName] = timerTask
+    
+    -- Conexão para aplicar o bug continuamente
+    bugConnections[playerName] = RunService.Heartbeat:Connect(function()
+        -- Verificar se ainda está ativo
+        if not buggedPlayers[playerName] then
+            if bugConnections[playerName] then
+                bugConnections[playerName]:Disconnect()
+                bugConnections[playerName] = nil
+            end
+            return
+        end
+        
+        local target = Players:FindFirstChild(playerName)
+        
+        -- Verificar se player existe
+        if not target or not target.Character or not target.Character:FindFirstChild("HumanoidRootPart") then
+            stopBugForPlayer(playerName)
+            createNotification("Parado", playerName .. " - Target perdido")
+            return
+        end
+        
+        -- Verificar se está no void ou céu
+        if isPlayerInVoidOrSky(target) then
+            stopBugForPlayer(playerName)
+            createNotification("Auto-Stop", playerName .. " - Void/Céu detectado")
+            return
+        end
+        
+        local hrp = target.Character.HumanoidRootPart
+        
+        local maxValue = 2000000000
+        local crazyVector = Vector3.new(
+            math.random(-maxValue, maxValue),
+            math.random(-maxValue, maxValue),
+            math.random(-maxValue, maxValue)
+        )
+        
+        -- Objetos falsos (sem precisar da arma)
+        local fakeMuzzle = Instance.new("Part")
+        local fakeHit = Instance.new("Part")
+        
+        local args = {
+            hrp,
+            hrp,
+            crazyVector,
+            hrp.Position,
+            fakeMuzzle,
+            fakeHit,
+            1000000000,
+            1000000000,
+            {false},
+            {
+                1000000000,
+                Vector3.new(30000000, 30000000, 30000000),
+                BrickColor.new(29),
+                0.05,
+                Enum.Material.SmoothPlastic,
+                0.05
+            },
+            true,
+            false
+        }
+        
+        pcall(function()
+            Remote:FireServer(unpack(args))
+        end)
+        
+        fakeMuzzle:Destroy()
+        fakeHit:Destroy()
+    end)
+end
+
+-- Função MELHORADA para detectar clique em player
+local function getPlayerFromMouse(mouse)
+    if not mouse then return nil end
+    
+    local target = mouse.Target
+    if not target then return nil end
+    
+    -- Tentar múltiplos níveis de parent
+    local currentParent = target
+    local attempts = 0
+    local maxAttempts = 10
+    
+    while currentParent and attempts < maxAttempts do
+        attempts = attempts + 1
+        
+        -- Verificar se é um character válido
+        if currentParent:FindFirstChild("Humanoid") and currentParent:FindFirstChild("HumanoidRootPart") then
+            local player = Players:GetPlayerFromCharacter(currentParent)
+            if player then
+                return player
+            end
+        end
+        
+        currentParent = currentParent.Parent
+    end
+    
+    -- Método alternativo: verificar por raycast
+    pcall(function()
+        local camera = workspace.CurrentCamera
+        local mouseRay = camera:ScreenPointToRay(mouse.X, mouse.Y)
+        local raycastParams = RaycastParams.new()
+        raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
+        raycastParams.FilterDescendantsInstances = {LocalPlayer.Character}
+        
+        local rayResult = workspace:Raycast(mouseRay.Origin, mouseRay.Direction * 1000, raycastParams)
+        
+        if rayResult and rayResult.Instance then
+            local hitPart = rayResult.Instance
+            local character = hitPart.Parent
+            
+            if character and character:FindFirstChild("Humanoid") then
+                local player = Players:GetPlayerFromCharacter(character)
+                if player then
+                    return player
+                end
+            end
+        end
+    end)
+    
+    return nil
+end
+
+tool.Equipped:Connect(function(mouse)
+    character = tool.Parent
+    if character and character:FindFirstChild("Humanoid") and character.Humanoid.RigType == Enum.HumanoidRigType.R15 then
+        humanoid = character:FindFirstChild("Humanoid")
+        if character.PrimaryPart then
+            lastPosition = character.PrimaryPart.Position
+        end
+        
+        -- Equipar aparência da Sword Angel APENAS UMA VEZ
+        if not appearanceEquipped then
+            pcall(function()
+                local args = { 13913101113 }
+                game:GetService("ReplicatedStorage"):WaitForChild("Remotes"):WaitForChild("Wear"):InvokeServer(unpack(args))
+            end)
+            appearanceEquipped = true
+            createNotification("Sword Angel", "Aparência equipada!")
+        end
+        
+        -- Conectar clique do mouse
+        mouse.Button1Down:Connect(function()
+            PerformAttack()
+            
+            local targetPlayer = getPlayerFromMouse(mouse)
+            if targetPlayer and targetPlayer ~= LocalPlayer then
+                bugPlayer(targetPlayer)
+            end
+        end)
+        
+        createNotification("Sword Angel Equipado", "Clique para atacar!")
+    end
+end)
+
+tool.Unequipped:Connect(function()
+    if currentAnimationTrack then
+        currentAnimationTrack:Stop(Settings["Fade Out"])
+        currentAnimationTrack = nil
+    end
+    
+    isAttacking = false
+    createNotification("Sword Angel Guardado", "Tool desequipado!")
+end)
+
+-- Limpeza automática quando players saem
+Players.PlayerRemoving:Connect(function(player)
+    local playerName = player.Name
+    stopBugForPlayer(playerName)
+end)
+
+-- Comandos de chat
+local function stopAllBugs()
+    for playerName, _ in pairs(buggedPlayers) do
+        stopBugForPlayer(playerName)
+    end
+    createNotification("Bugs Parados", "Todos desbugados!")
+end
+
+LocalPlayer.Chatted:Connect(function(message)
+    if message:lower() == "/stopallbugs" then
+        stopAllBugs()
+    elseif message:lower() == "/buggedlist" then
+        local count = 0
+        for _ in pairs(buggedPlayers) do
+            count = count + 1
+        end
+        if count > 0 then
+            createNotification("Lista", count .. " players bugados")
+        else
+            createNotification("Lista", "Nenhum player bugado")
+        end
+    elseif message:lower() == "/stopanim" then
+        if currentAnimationTrack then
+            currentAnimationTrack:Stop(Settings["Fade Out"])
+            currentAnimationTrack = nil
+        end
+        isAttacking = false
+        createNotification("Parado", "Animação interrompida!")
+    end
+end)
+
+tool.Parent = LocalPlayer.Backpack
+
+createNotification("✅ Carregado!", "Sistema atualizado - Bug 5s ativo!")
+
+game:GetService("StarterGui"):SetCore("SendNotification",{
+    Title = "Click Fling Carregado",
+    Text = "Clique no player para fling",
+    Button1 = "ok",
+    Duration = 5
+})
+
+wait(1)
+
+-- Services
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local LocalPlayer = Players.LocalPlayer
+
+-- Variables
+local activeFlings = {}
+local flingDebounce = false
+local couchEquipped = false
+
+-- ======================
+-- TOOL SETUP
+-- ======================
+local tool = Instance.new("Tool")
+tool.Name = "Click Fling"
+tool.RequiresHandle = true
+tool.CanBeDropped = true
+
+local handle = Instance.new("Part")
+handle.Name = "Handle"
+handle.Size = Vector3.new(0.1, 0.1, 0.1)
+handle.Massless = true
+handle.Anchored = false
+handle.CanCollide = false
+handle.Transparency = 0.5
+handle.Color = Color3.fromRGB(255, 100, 100)
+
+local mesh = Instance.new("SpecialMesh", handle)
+mesh.MeshType = Enum.MeshType.Sphere
+mesh.Scale = Vector3.new(0.05, 0.05, 0.05)
+mesh.Parent = handle
+
+handle.Parent = tool
+
+local function createNotification(title, message)
+    game:GetService("StarterGui"):SetCore("SendNotification",{
+        Title = title,
+        Text = message,
+        Duration = 3
+    })
+end
+
+-- ======================
+-- SISTEMA DE SOFÁ/COUCH (MÉTODO CORRETO DO JOGO)
+-- ======================
+local function ClearAllTools()
+    pcall(function()
+        game:GetService("ReplicatedStorage"):WaitForChild("RE"):WaitForChild("1Clea1rTool1s"):FireServer("ClearAllTools")
+    end)
+end
+
+local function GetAndEquipCouch()
+    -- Verificar se já tem o Couch no Backpack
+    for _, v in ipairs(LocalPlayer.Backpack:GetChildren()) do
+        if v:IsA("Tool") and v.Name == "Couch" then
+            v.Grip = CFrame.new(0, 2, -2.5)
+            v.Parent = LocalPlayer.Character
+            couchEquipped = true
+            return true
+        end
+    end
+    
+    -- Pedir o Couch pelo Remote
+    pcall(function()
+        ReplicatedStorage.RE:FindFirstChild("1Too1l"):InvokeServer("PickingTools", "Couch")
+    end)
+    
+    -- Aguardar até 0.5 segundos para o Couch aparecer
+    local startTime = tick()
+    while tick() - startTime < 0.5 do
+        for _, v in ipairs(LocalPlayer.Backpack:GetChildren()) do
+            if v:IsA("Tool") and v.Name == "Couch" then
+                v.Grip = CFrame.new(0, 2, -2.5)
+                v.Parent = LocalPlayer.Character
+                couchEquipped = true
+                createNotification("Sofá Equipado", "Couch obtido com sucesso!")
+                return true
+            end
+        end
+        task.wait(0.1)
+    end
+    
+    couchEquipped = false
+    return false
+end
+
+local function UnequipCouch()
+    pcall(function()
+        local Character = LocalPlayer.Character
+        if not Character then return end
+        
+        local Humanoid = Character:FindFirstChildOfClass("Humanoid")
+        if Humanoid then
+            Humanoid.Sit = false
+            Humanoid:ChangeState(Enum.HumanoidStateType.Freefall)
+        end
+        
+        -- Remover o Couch do Character
+        for _, tool in pairs(Character:GetChildren()) do
+            if tool:IsA("Tool") and tool.Name == "Couch" then
+                tool:Destroy()
+            end
+        end
+        
+        -- Remover o Couch do Backpack
+        for _, tool in pairs(LocalPlayer.Backpack:GetChildren()) do
+            if tool:IsA("Tool") and tool.Name == "Couch" then
+                tool:Destroy()
+            end
+        end
+    end)
+    
+    couchEquipped = false
+end
+
+-- ======================
+-- SISTEMA DE FLING
+-- ======================
+local function IsPlayerSitting(targetPlayer)
+    if not targetPlayer or not targetPlayer.Character then return false end
+    local humanoid = targetPlayer.Character:FindFirstChildOfClass("Humanoid")
+    return humanoid and humanoid.Sit
+end
+
+local function SkidFling(TargetPlayer, originalPosition)
+    local Character = LocalPlayer.Character
+    local Humanoid = Character and Character:FindFirstChildOfClass("Humanoid")
+    local RootPart = Humanoid and Humanoid.RootPart
+    local TCharacter = TargetPlayer.Character
+    local THumanoid = TCharacter and TCharacter:FindFirstChildOfClass("Humanoid")
+    local TRootPart = THumanoid and THumanoid.RootPart
+    local THead = TCharacter and TCharacter:FindFirstChild("Head")
+    
+    if not (Character and Humanoid and RootPart and TCharacter and THumanoid and TRootPart) then 
+        createNotification("Erro", "Personagens inválidos")
+        ClearAllTools()
+        return 
+    end
+    
+    if RootPart.Velocity.Magnitude < 50 then
+        getgenv().OldPos = RootPart.CFrame
+    end
+    
+    if THead then
+        workspace.CurrentCamera.CameraSubject = THead
+    elseif THumanoid then
+        workspace.CurrentCamera.CameraSubject = THumanoid
+    end
+    
+    local FPos = function(BasePart, Pos, Ang)
+        RootPart.CFrame = CFrame.new(BasePart.Position) * Pos * Ang
+        Character:SetPrimaryPartCFrame(CFrame.new(BasePart.Position) * Pos * Ang)
+        RootPart.Velocity = Vector3.new(9e7, 9e7 * 10, 9e7)
+        RootPart.RotVelocity = Vector3.new(9e8, 9e8, 9e8)
+    end
+    
+    local SFBasePart = function(BasePart)
+        local TimeToWait = 5
+        local Time = tick()
+        local Angle = 0
+        
+        repeat
+            if RootPart and THumanoid then
+                -- Verificar se target caiu no void
+                if TRootPart and TRootPart.Position.Y < -100 then
+                    createNotification("Fling Completo", TargetPlayer.Name .. " caiu no void!")
+                    break
+                end
+                
+                if BasePart.Velocity.Magnitude < 50 then
+                    Angle = Angle + 100
+                    FPos(BasePart, CFrame.new(0, 1.5, 0) + THumanoid.MoveDirection * BasePart.Velocity.Magnitude / 1.25, CFrame.Angles(math.rad(Angle),0,0))
+                    task.wait()
+                    FPos(BasePart, CFrame.new(0, -1.5, 0) + THumanoid.MoveDirection * BasePart.Velocity.Magnitude / 1.25, CFrame.Angles(math.rad(Angle),0,0))
+                    task.wait()
+                    FPos(BasePart, CFrame.new(2.25, 1.5, -2.25) + THumanoid.MoveDirection * BasePart.Velocity.Magnitude / 1.25, CFrame.Angles(math.rad(Angle),0,0))
+                    task.wait()
+                    FPos(BasePart, CFrame.new(-2.25, -1.5, 2.25) + THumanoid.MoveDirection * BasePart.Velocity.Magnitude / 1.25, CFrame.Angles(math.rad(Angle),0,0))
+                    task.wait()
+                    FPos(BasePart, CFrame.new(0, 1.5, 0) + THumanoid.MoveDirection, CFrame.Angles(math.rad(Angle),0,0))
+                    task.wait()
+                    FPos(BasePart, CFrame.new(0, -1.5, 0) + THumanoid.MoveDirection, CFrame.Angles(math.rad(Angle),0,0))
+                    task.wait()
+                else
+                    FPos(BasePart, CFrame.new(0, 1.5, THumanoid.WalkSpeed), CFrame.Angles(math.rad(90),0,0))
+                    task.wait()
+                    FPos(BasePart, CFrame.new(0, -1.5, -THumanoid.WalkSpeed), CFrame.Angles(0,0,0))
+                    task.wait()
+                    FPos(BasePart, CFrame.new(0, 1.5, THumanoid.WalkSpeed), CFrame.Angles(math.rad(90),0,0))
+                    task.wait()
+                    FPos(BasePart, CFrame.new(0, 1.5, TRootPart.Velocity.Magnitude / 1.25), CFrame.Angles(math.rad(90),0,0))
+                    task.wait()
+                    FPos(BasePart, CFrame.new(0, -1.5, -TRootPart.Velocity.Magnitude / 1.25), CFrame.Angles(0,0,0))
+                    task.wait()
+                    FPos(BasePart, CFrame.new(0, 1.5, TRootPart.Velocity.Magnitude / 1.25), CFrame.Angles(math.rad(90),0,0))
+                    task.wait()
+                    FPos(BasePart, CFrame.new(0, -1.5, 0), CFrame.Angles(math.rad(90),0,0))
+                    task.wait()
+                    FPos(BasePart, CFrame.new(0, -1.5, 0), CFrame.Angles(0,0,0))
+                    task.wait()
+                    FPos(BasePart, CFrame.new(0, -1.5, 0), CFrame.Angles(math.rad(-90),0,0))
+                    task.wait()
+                    FPos(BasePart, CFrame.new(0, -1.5, 0), CFrame.Angles(0,0,0))
+                    task.wait()
+                end
+            else
+                break
+            end
+        until BasePart.Velocity.Magnitude > 500 or not BasePart.Parent or not TargetPlayer.Character or THumanoid.Sit or Humanoid.Health <= 0 or tick() > Time + TimeToWait or (TRootPart and TRootPart.Position.Y < -100)
+    end
+    
+    local BV = Instance.new("BodyVelocity")
+    BV.Parent = RootPart
+    BV.Velocity = Vector3.new(9e8, 9e8, 9e8)
+    BV.MaxForce = Vector3.new(1/0, 1/0, 1/0)
+    
+    Humanoid:SetStateEnabled(Enum.HumanoidStateType.Seated, false)
+    
+    if TRootPart and THead then
+        if (TRootPart.CFrame.p - THead.CFrame.p).Magnitude > 5 then
+            SFBasePart(THead)
+        else
+            SFBasePart(TRootPart)
+        end
+    elseif TRootPart then
+        SFBasePart(TRootPart)
+    elseif THead then
+        SFBasePart(THead)
+    end
+    
+    BV:Destroy()
+    Humanoid:SetStateEnabled(Enum.HumanoidStateType.Seated, true)
+    workspace.CurrentCamera.CameraSubject = Humanoid
+    
+    task.wait(0.5)
+    
+    -- LIMPAR SOFÁ COM O REMOTE CORRETO
+    ClearAllTools()
+    UnequipCouch()
+    
+    if originalPosition and RootPart then
+        RootPart.CFrame = originalPosition
+        RootPart.Velocity = Vector3.new(0, 0, 0)
+        RootPart.RotVelocity = Vector3.new(0, 0, 0)
+    end
+    
+    task.wait(0.3)
+    workspace.FallenPartsDestroyHeight = -500
+end
+
+local function ExecuteFling(target)
+    if flingDebounce then
+        createNotification("Aguarde", "Fling em andamento!")
+        return
+    end
+    
+    if IsPlayerSitting(target) then
+        createNotification("Fling Bloqueado", target.Name .. " está sentado!")
+        return
+    end
+    
+    local RootPart = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if not RootPart then 
+        createNotification("Erro", "Seu personagem está inválido")
+        return 
+    end
+    
+    flingDebounce = true
+    
+    local originalPosition = RootPart.CFrame
+    local originalFallenHeight = workspace.FallenPartsDestroyHeight
+    workspace.FallenPartsDestroyHeight = 0/0
+    
+    createNotification("Preparando Fling", "Equipando sofá...")
+    
+    -- EQUIPAR SOFÁ ANTES DO FLING
+    if not GetAndEquipCouch() then
+        createNotification("Erro", "Não foi possível equipar sofá")
+        workspace.FallenPartsDestroyHeight = originalFallenHeight
+        flingDebounce = false
+        return
+    end
+    
+    task.wait(0.5)
+    createNotification("Fling Iniciado", "Atacando " .. target.Name)
+    
+    task.spawn(function()
+        while not target.Character do task.wait(0.1) end
+        SkidFling(target, originalPosition)
+        
+        task.wait(1)
+        workspace.FallenPartsDestroyHeight = originalFallenHeight
+        flingDebounce = false
+        
+        createNotification("Fling Completo", target.Name .. " foi atingido!")
+    end)
+end
+
+-- Função ULTRA MELHORADA para detectar clique em player (funciona à distância)
+local function getPlayerFromMouse(mouse)
+    if not mouse then return nil end
+    
+    -- Método 1: Raycast direto da câmera (MELHOR PARA LONGA DISTÂNCIA)
+    local camera = workspace.CurrentCamera
+    if camera then
+        local success, result = pcall(function()
+            local mouseRay = camera:ScreenPointToRay(mouse.X, mouse.Y)
+            local raycastParams = RaycastParams.new()
+            raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+            raycastParams.FilterDescendantsInstances = {LocalPlayer.Character}
+            raycastParams.IgnoreWater = true
+            
+            -- Raycast de 10000 studs para pegar players muito longe
+            local rayResult = workspace:Raycast(mouseRay.Origin, mouseRay.Direction * 10000, raycastParams)
+            
+            if rayResult and rayResult.Instance then
+                local hitPart = rayResult.Instance
+                local character = hitPart
+                
+                -- Subir até 15 níveis procurando o Character
+                for i = 1, 15 do
+                    if character then
+                        if character:FindFirstChild("Humanoid") and character:FindFirstChild("HumanoidRootPart") then
+                            local player = Players:GetPlayerFromCharacter(character)
+                            if player and player ~= LocalPlayer then
+                                return player
+                            end
+                        end
+                        character = character.Parent
+                    else
+                        break
+                    end
+                end
+            end
+        end)
+        
+        if success and result then
+            return result
+        end
+    end
+    
+    -- Método 2: Mouse.Target (fallback para perto)
+    local target = mouse.Target
+    if target then
+        local currentParent = target
+        local attempts = 0
+        
+        while currentParent and attempts < 15 do
+            attempts = attempts + 1
+            
+            if currentParent:FindFirstChild("Humanoid") and currentParent:FindFirstChild("HumanoidRootPart") then
+                local player = Players:GetPlayerFromCharacter(currentParent)
+                if player and player ~= LocalPlayer then
+                    return player
+                end
+            end
+            
+            currentParent = currentParent.Parent
+        end
+    end
+    
+    -- Método 3: Verificar todos os players no FOV (última tentativa)
+    local mousePosition = Vector2.new(mouse.X, mouse.Y)
+    local closestPlayer = nil
+    local closestDistance = math.huge
+    
+    for _, player in pairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character then
+            local character = player.Character
+            local hrp = character:FindFirstChild("HumanoidRootPart")
+            
+            if hrp then
+                local screenPos, onScreen = camera:WorldToScreenPoint(hrp.Position)
+                
+                if onScreen then
+                    local screenPosition = Vector2.new(screenPos.X, screenPos.Y)
+                    local distance = (mousePosition - screenPosition).Magnitude
+                    
+                    -- Se estiver perto do cursor (100 pixels)
+                    if distance < 100 and distance < closestDistance then
+                        closestDistance = distance
+                        closestPlayer = player
+                    end
+                end
+            end
+        end
+    end
+    
+    return closestPlayer
+end
+
+tool.Equipped:Connect(function(mouse)
+    createNotification("Click Fling Equipado", "Clique no player para fling!")
+    
+    -- NOVA CONEXÃO SEM DEBOUNCE QUE FALHA
+    local mouseConnection = mouse.Button1Down:Connect(function()
+        -- Usar task.spawn para não bloquear
+        task.spawn(function()
+            -- Verificar se já está em fling
+            if flingDebounce then
+                createNotification("Aguarde", "Fling em andamento!")
+                return
+            end
+            
+            -- Tentar detectar o player (3 tentativas)
+            local targetPlayer = nil
+            
+            for attempt = 1, 3 do
+                targetPlayer = getPlayerFromMouse(mouse)
+                
+                if targetPlayer and targetPlayer ~= LocalPlayer then
+                    break
+                end
+                
+                if attempt < 3 then
+                    task.wait(0.05)
+                end
+            end
+            
+            -- Executar fling se encontrou alvo
+            if targetPlayer and targetPlayer ~= LocalPlayer then
+                ExecuteFling(targetPlayer)
+            else
+                createNotification("Erro", "Nenhum player detectado! Tente novamente.")
+            end
+        end)
+    end)
+    
+    -- Guardar conexão para limpar depois
+    if not tool:FindFirstChild("MouseConnection") then
+        local connectionStorage = Instance.new("ObjectValue")
+        connectionStorage.Name = "MouseConnection"
+        connectionStorage.Parent = tool
+    end
+end)
+
+tool.Unequipped:Connect(function()
+    UnequipCouch()
+    createNotification("Click Fling Guardado", "Tool desequipado!")
+end)
+
+-- Comandos de chat
+LocalPlayer.Chatted:Connect(function(message)
+    if message:lower() == "/stopfling" then
+        flingDebounce = false
+        UnequipCouch()
+        workspace.FallenPartsDestroyHeight = -500
+        createNotification("Fling Parado", "Sistema resetado!")
+    elseif message:lower() == "/testcouch" then
+        if GetAndEquipCouch() then
+            createNotification("Teste OK", "Sofá equipado com sucesso!")
+        else
+            createNotification("Teste Falhou", "Não foi possível equipar sofá")
+        end
+    end
+end)
+
+tool.Parent = LocalPlayer.Backpack
+
+createNotification("Carregado!", "Click Fling pronto para uso!")
+
+-- Services
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local LocalPlayer = Players.LocalPlayer
+local character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+local humanoid = character:WaitForChild("Humanoid")
+
+-- IDs de animações padrão do Roblox (R15)
+local DefaultAnimations = {
+    idle = "rbxassetid://507766666",
+    walk = "rbxassetid://507777826",
+    run = "rbxassetid://507767714",
+    jump = "rbxassetid://507765000",
+    fall = "rbxassetid://507767968",
+    climb = "rbxassetid://507765644",
+    swim = "rbxassetid://507784897"
+}
+
+local systemActive = true
+local savedAnimations = {}
+local heartbeatConnection = nil
+
+-- ======================
+-- TOOL SETUP
+-- ======================
+local tool = Instance.new("Tool")
+tool.Name = "Movement Toggle [ON]"
+tool.RequiresHandle = false
+tool.CanBeDropped = false
+
+local function notify(title, message)
+    game:GetService("StarterGui"):SetCore("SendNotification", {
+        Title = title,
+        Text = message,
+        Duration = 3
+    })
+end
+
+local function saveDefaultAnimations()
+    local animate = character:FindFirstChild("Animate")
+    if not animate then return end
+    
+    pcall(function()
+        if animate:FindFirstChild("idle") and animate.idle:FindFirstChild("Animation1") then
+            savedAnimations.idle = animate.idle.Animation1.AnimationId
+        end
+        if animate:FindFirstChild("walk") and animate.walk:FindFirstChild("WalkAnim") then
+            savedAnimations.walk = animate.walk.WalkAnim.AnimationId
+        end
+        if animate:FindFirstChild("run") and animate.run:FindFirstChild("RunAnim") then
+            savedAnimations.run = animate.run.RunAnim.AnimationId
+        end
+        if animate:FindFirstChild("jump") and animate.jump:FindFirstChild("JumpAnim") then
+            savedAnimations.jump = animate.jump.JumpAnim.AnimationId
+        end
+    end)
+end
+
+local function stopAllMovementAnimations()
+    -- Parar todas as animações em execução
+    pcall(function()
+        for _, track in pairs(humanoid:GetPlayingAnimationTracks()) do
+            if track.IsPlaying and track.Name and track.Name:match("EmoteMovement_") then
+                track:Stop(0.2)
+            end
+        end
+    end)
+end
+
+local function restoreDefaultAnimations()
+    local animate = character:FindFirstChild("Animate")
+    if not animate then return end
+    
+    pcall(function()
+        animate.Disabled = true
+        
+        -- Restaurar animações padrão
+        if animate:FindFirstChild("idle") and animate.idle:FindFirstChild("Animation1") then
+            animate.idle.Animation1.AnimationId = DefaultAnimations.idle
+        end
+        if animate:FindFirstChild("walk") and animate.walk:FindFirstChild("WalkAnim") then
+            animate.walk.WalkAnim.AnimationId = DefaultAnimations.walk
+        end
+        if animate:FindFirstChild("run") and animate.run:FindFirstChild("RunAnim") then
+            animate.run.RunAnim.AnimationId = DefaultAnimations.run
+        end
+        if animate:FindFirstChild("jump") and animate.jump:FindFirstChild("JumpAnim") then
+            animate.jump.JumpAnim.AnimationId = DefaultAnimations.jump
+        end
+        if animate:FindFirstChild("fall") and animate.fall:FindFirstChild("FallAnim") then
+            animate.fall.FallAnim.AnimationId = DefaultAnimations.fall
+        end
+        if animate:FindFirstChild("climb") and animate.climb:FindFirstChild("ClimbAnim") then
+            animate.climb.ClimbAnim.AnimationId = DefaultAnimations.climb
+        end
+        if animate:FindFirstChild("swim") and animate.swim:FindFirstChild("Swim") then
+            animate.swim.Swim.AnimationId = DefaultAnimations.swim
+        end
+        
+        wait(0.1)
+        animate.Disabled = false
+    end)
+end
+
+local function restoreCustomAnimations()
+    local animate = character:FindFirstChild("Animate")
+    if not animate or not next(savedAnimations) then return end
+    
+    pcall(function()
+        animate.Disabled = true
+        
+        -- Restaurar animações customizadas salvas
+        if savedAnimations.idle and animate:FindFirstChild("idle") then
+            animate.idle.Animation1.AnimationId = savedAnimations.idle
+        end
+        if savedAnimations.walk and animate:FindFirstChild("walk") then
+            animate.walk.WalkAnim.AnimationId = savedAnimations.walk
+        end
+        if savedAnimations.run and animate:FindFirstChild("run") then
+            animate.run.RunAnim.AnimationId = savedAnimations.run
+        end
+        if savedAnimations.jump and animate:FindFirstChild("jump") then
+            animate.jump.JumpAnim.AnimationId = savedAnimations.jump
+        end
+        
+        wait(0.1)
+        animate.Disabled = false
+    end)
+end
+
+local function disconnectHeartbeat()
+    if heartbeatConnection then
+        heartbeatConnection:Disconnect()
+        heartbeatConnection = nil
+    end
+end
+
+local function createBlockLoop()
+    -- Loop que BLOQUEIA as animações de voltarem
+    if heartbeatConnection then
+        heartbeatConnection:Disconnect()
+    end
+    
+    heartbeatConnection = RunService.Heartbeat:Connect(function()
+        if systemActive then return end -- Se está ativo, não faz nada
+        
+        -- Parar qualquer animação EmoteMovement_ que tentar iniciar
+        pcall(function()
+            for _, track in pairs(humanoid:GetPlayingAnimationTracks()) do
+                if track.IsPlaying and track.Name and track.Name:match("EmoteMovement_") then
+                    track:Stop(0)
+                end
+            end
+        end)
+    end)
+end
+
+local function pauseSystem()
+    systemActive = false
+    
+    -- Desativar sistemas globais
+    pcall(function()
+        if getgenv then
+            getgenv().isSystemActive = false
+            getgenv().isFlySystemActive = false
+        end
+    end)
+    
+    -- Parar todas as animações customizadas
+    stopAllMovementAnimations()
+    
+    -- Restaurar animações padrão
+    restoreDefaultAnimations()
+    
+    -- Criar loop de bloqueio
+    createBlockLoop()
+    
+    tool.Name = "Movement Toggle [OFF]"
+    notify("Sistema BLOQUEADO", "Loop desativado + animações bloqueadas")
+end
+
+local function resumeSystem()
+    systemActive = true
+    
+    -- Desconectar o loop de bloqueio
+    disconnectHeartbeat()
+    
+    -- Reativar sistemas globais
+    pcall(function()
+        if getgenv then
+            getgenv().isSystemActive = true
+            getgenv().isFlySystemActive = true
+        end
+    end)
+    
+    -- Restaurar animações customizadas
+    restoreCustomAnimations()
+    
+    tool.Name = "Movement Toggle [ON]"
+    notify("Sistema DESBLOQUEADO", "Loop reativado + animações custom ativas")
+end
+
+local function toggleSystem()
+    if systemActive then
+        pauseSystem()
+    else
+        resumeSystem()
+    end
+end
+
+tool.Activated:Connect(toggleSystem)
+
+tool.Equipped:Connect(function()
+    if systemActive then
+        notify("Movement Toggle", "Sistema ATIVO - Clique para BLOQUEAR")
+    else
+        notify("Movement Toggle", "Sistema BLOQUEADO - Clique para DESBLOQUEAR")
+    end
+end)
+
+-- Salvar animações customizadas ao iniciar
+task.spawn(function()
+    wait(2)
+    saveDefaultAnimations()
+end)
+
+-- Atualizar referências quando respawn
+LocalPlayer.CharacterAdded:Connect(function(newCharacter)
+    character = newCharacter
+    humanoid = newCharacter:WaitForChild("Humanoid")
+    savedAnimations = {}
+    
+    -- Desconectar loop anterior
+    disconnectHeartbeat()
+    
+    task.spawn(function()
+        wait(2)
+        saveDefaultAnimations()
+        
+        -- Se estava bloqueado, criar novo loop de bloqueio
+        if not systemActive then
+            createBlockLoop()
+        end
+    end)
+end)
+
+tool.Parent = LocalPlayer.Backpack
