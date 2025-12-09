@@ -1,0 +1,779 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+local StarterGui = game:GetService("StarterGui")
+
+local LocalPlayer = Players.LocalPlayer
+local isMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+
+local connections = {}
+local characterConnections = {}
+local activeRenderStepped = nil
+local activeDiedConnection = nil
+local activeTrail = nil
+local activeBodyForce = nil
+local activeTauntAnimation = nil
+local isTaunting = false
+
+local musicPlayer = Instance.new("Sound", Workspace)
+musicPlayer.Name = "GameMusicPlayer"
+musicPlayer.Looped = true
+musicPlayer.Volume = 2
+
+local musicIDs = {
+	81488332672986, 73043739930927, 109844626128224, 81627117515835, 74382907298457
+}
+local tauntAnimationIDs = {
+	"rbxassetid://75752382380063", "rbxassetid://131991078572593", "rbbassetid://93334432462341",
+	"rbxassetid://129787664584610", "rbxassetid://92266904563270", "rbxassetid://122120443600865",
+	"rbxassetid://120629563851640", "rbxassetid://78653596566468", "rbxassetid://119091215368588",
+	"rbxassetid://113375965758912", "rbxassetid://126899447275562", "rbxassetid://70653974473742"
+}
+local currentMusicIndex = 1
+local currentTauntIndex = 1
+local isMuted = false
+
+local function createButton(guiName, text, size, position, anchorPoint)
+	local screenGui = Instance.new("ScreenGui", LocalPlayer:WaitForChild("PlayerGui"))
+	screenGui.Name = guiName
+	screenGui.ResetOnSpawn = false
+
+	local button = Instance.new("TextButton", screenGui)
+	button.BackgroundTransparency = 0.4
+	button.TextScaled = true
+	button.Text = text
+	button.AnchorPoint = anchorPoint or Vector2.new(0.5, 0.5)
+	button.Position = position
+	button.Size = size
+	button.BackgroundColor3 = Color3.fromRGB(75, 160, 255)
+	button.TextColor3 = Color3.fromRGB(255, 255, 255)
+	button.TextSize = 20
+	button.Font = Enum.Font.ArialBold
+
+	Instance.new("UICorner", button)
+	local stroke = Instance.new("UIStroke", button)
+	stroke.Thickness = 2
+	stroke.Color = Color3.fromRGB(20, 110, 200)
+	stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+
+	return button, screenGui
+end
+
+local spinButton, spinGui = createButton("SpinGUI", "Spin", UDim2.fromOffset(80, 80), UDim2.new(0.75, 0, 0.75, 0), Vector2.new(0.5, 0.5))
+local tauntButton, tauntGui = createButton("TauntGUI", "Taunt", UDim2.fromOffset(40, 40), UDim2.new(0.9, 0, 0.6, 0), Vector2.new(0.5, 0.5))
+local jumpButton, jumpGui = createButton("JumpGUI", "JUMP", UDim2.fromOffset(80, 80), UDim2.new(0.95, 0, 0.95, 0), Vector2.new(1, 1))
+local nextMusicButton, nextMusicGui = createButton("MusicControlGui", "Next Music", UDim2.fromOffset(180, 60), UDim2.new(0.5, -40, -0.05, 0), Vector2.new(0.5, 0.5))
+local muteButton, muteGui = createButton("MuteControlGui", "Mute", UDim2.fromOffset(80, 60), UDim2.new(0.5, 90, -0.05, 0), Vector2.new(0.5, 0.5))
+
+if not isMobile then
+	spinGui.Enabled = false
+	tauntGui.Enabled = false
+	jumpGui.Enabled = false
+end
+
+local function updateMusicLabel()
+	nextMusicButton.Text = "Now Playing: ID " .. tostring(musicIDs[currentMusicIndex]):sub(1, 4) .. "..."
+end
+
+local function playNextMusic()
+	musicPlayer:Stop()
+	currentMusicIndex = (currentMusicIndex % #musicIDs) + 1
+	musicPlayer.SoundId = "rbxassetid://" .. tostring(musicIDs[currentMusicIndex])
+	musicPlayer.Volume = isMuted and 0 or 2
+	if not isMuted then
+		musicPlayer:Play()
+	end
+	updateMusicLabel()
+end
+
+local function toggleMute()
+	isMuted = not isMuted
+	musicPlayer.Volume = isMuted and 0 or 2
+	muteButton.Text = isMuted and "Unmute" or "Mute"
+	muteButton.BackgroundColor3 = isMuted and Color3.fromRGB(200, 50, 50) or Color3.fromRGB(75, 160, 255)
+end
+
+connections.nextMusic = nextMusicButton.Activated:Connect(playNextMusic)
+connections.mute = muteButton.Activated:Connect(toggleMute)
+playNextMusic()
+
+task.defer(function()
+	local touchGui = LocalPlayer:WaitForChild("PlayerGui"):FindFirstChild("TouchGui", 5)
+	if touchGui and touchGui.TouchControlFrame and touchGui.TouchControlFrame.JumpButton then
+		touchGui.TouchControlFrame.JumpButton.Visible = false
+	end
+end)
+
+local function cleanupCharacter()
+	if activeRenderStepped and activeRenderStepped.Connected then
+		activeRenderStepped:Disconnect()
+		activeRenderStepped = nil
+	end
+	if activeDiedConnection and activeDiedConnection.Connected then
+		activeDiedConnection:Disconnect()
+		activeDiedConnection = nil
+	end
+	if activeTrail then
+		activeTrail:Destroy()
+		activeTrail = nil
+	end
+
+	local character = LocalPlayer.Character
+	if character and character.Humanoid then
+		local humanoid = character.Humanoid
+		if humanoid.Animator then
+			for _, track in ipairs(humanoid.Animator:GetPlayingAnimationTracks()) do
+				track:Stop(0.01)
+			end
+		end
+		for _, descendant in ipairs(character:GetDescendants()) do
+			if descendant:IsA("BodyMover") or descendant:IsA("BodyForce") or descendant:IsA("BodyVelocity") then
+				descendant:Destroy()
+			end
+		end
+		humanoid.BreakJointsOnDeath = true
+		humanoid.PlatformStand = false
+	end
+
+	if activeBodyForce and activeBodyForce.Parent then
+		activeBodyForce:Destroy()
+	end
+	activeBodyForce = nil
+
+	for _, connection in pairs(characterConnections) do
+		if connection and connection.Connected then
+			connection:Disconnect()
+		end
+	end
+	characterConnections = {}
+	task.wait(0.05)
+end
+
+local function createTrail(parent, color, lifetime, width, offset)
+	local trail = Instance.new("Trail")
+	trail.Lifetime = lifetime
+	trail.Texture = ""
+	trail.LightInfluence = 0
+	trail.Color = ColorSequence.new(color, color)
+	trail.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(1, 1) })
+	trail.WidthScale = NumberSequence.new(width)
+
+	local attachment0 = Instance.new("Attachment", parent)
+	attachment0.Name = "TrailAttachment0"
+	attachment0.Position = Vector3.new(0, 0, -offset)
+
+	local attachment1 = Instance.new("Attachment", parent)
+	attachment1.Name = "TrailAttachment1"
+	attachment1.Position = Vector3.new(0, 0, offset)
+
+	trail.Attachment0 = attachment0
+	trail.Attachment1 = attachment1
+	trail.Parent = parent
+	trail.Enabled = false
+	return trail
+end
+
+local function setupCharacterController(character)
+	task.wait(0.1)
+	cleanupCharacter()
+
+	if not character or not character.Parent then return end
+
+	local humanoid = character:WaitForChild("Humanoid", 10)
+	local rootPart = character:WaitForChild("HumanoidRootPart", 10)
+	local lowerTorso = character:WaitForChild("LowerTorso", 10)
+
+	if not humanoid or not rootPart or not character.Parent then return end
+
+	local raycastParams = RaycastParams.new()
+	raycastParams.FilterDescendantsInstances = { character }
+	raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+
+	local controlScript = LocalPlayer.PlayerScripts:FindFirstChild("ControlScript")
+	if controlScript then
+		for _, child in ipairs(controlScript:GetChildren()) do
+			if child:IsA("ModuleScript") and (child.Name == "CameraModule" or child.Name == "MovementController") then
+				child:Destroy()
+			end
+		end
+	end
+
+	local animateScript = character:FindFirstChild("Animate")
+	if animateScript then animateScript:Destroy() end
+
+	humanoid.PlatformStand = false
+	humanoid.BreakJointsOnDeath = true
+	rootPart.AssemblyLinearVelocity = Vector3.zero
+
+	if activeBodyForce and activeBodyForce.Parent then activeBodyForce:Destroy() end
+	activeBodyForce = Instance.new("BodyForce", rootPart)
+	activeBodyForce.Force = Vector3.zero
+
+	local isFloating = false
+	local defaultWalkSpeed = 26
+	local baseWalkSpeed = humanoid.WalkSpeed
+	local gravityForce = rootPart:GetMass() * 73.575
+	local stompForce = rootPart:GetMass() * 50
+	humanoid.AutoRotate = false
+
+	local animator = humanoid:FindFirstChildOfClass("Animator") or Instance.new("Animator", humanoid)
+
+	local state = {
+		isChargingSpindash = false,
+		isDashing = false,
+		isThokking = false,
+		canThok = true,
+		isSkydiving = false,
+		isJumping = false,
+		isSpinLocked = false,
+		jumpCount = 0,
+		thokCount = 0,
+		lastSpindashChargeTime = 0,
+		lastRunSoundTime = 0,
+		lastJumpTime = 0,
+	}
+
+	local config = {
+		maxSpeed = 250,
+		runAccel = 40,
+		runDecel = 50,
+		airAccel = 0.9,
+		maxAirSpeed = 550,
+		jumpCountMax = 2,
+		thokCountMax = 3,
+		jumpHeight = 26,
+		thokBoost = 1.6,
+		thokForwardForce = 135 * 1,
+		thokDuration = 0.35,
+		thokVelocity = 400,
+		thokAirtime = 0.45,
+		spindashMinCharge = 0.1,
+		spindashChargeSpeed = 15,
+		spindashForceSmall = 26,
+		spindashForceMedium = 135 * (1 + 0.3 / 0.8 * 3),
+		spindashForceLarge = 400,
+		spindashDurationSmall = 0.2,
+		spindashDurationMedium = 0.3,
+		spindashDurationLarge = 0.6,
+		spindashSpeedAdjustSmall = 1,
+		spindashSpeedAdjustMedium = 1,
+		spindashSpeedAdjustLarge = 10,
+		runSoundThreshold = 66,
+		runSoundCooldown = 0.6,
+		sprintSpeedThreshold = 66,
+		sprintAnimSpeedMin = 1,
+		sprintAnimSpeedMax = 6,
+		sprintAnimAccel = 5,
+		currentSprintAnimSpeed = 1,
+		cameraBaseFov = 70,
+		cameraMaxFov = 90,
+		cameraFovLerp = 0.15,
+		cameraZoomLerp = 0.3,
+		cameraZoomDistance = 15,
+		cameraZoomThreshold = 50,
+		trailColor = Color3.new(0, 1, 1),
+		trailSpeedThreshold = defaultWalkSpeed * 1.2,
+	}
+
+	humanoid.UseJumpPower = true
+	humanoid.JumpPower = 50
+
+	local function loadAnimation(id, priority, looped)
+		local anim = Instance.new("Animation")
+		anim.AnimationId = "rbxassetid://" .. id
+		local track = animator:LoadAnimation(anim)
+		track.Priority = priority
+		track.Looped = looped
+		anim.Parent = animator
+		return track
+	end
+
+	local function loadSound(id)
+		local sound = Instance.new("Sound", rootPart)
+		sound.SoundId = "rbxassetid://" .. id
+		sound.Volume = 3
+		return sound
+	end
+
+	local animations = {
+		idle = loadAnimation("4211223236", Enum.AnimationPriority.Idle, true),
+		run = loadAnimation("76931637880681", Enum.AnimationPriority.Core, true),
+		walk = loadAnimation("656118341", Enum.AnimationPriority.Core, true),
+		spindashCharge = loadAnimation("119889021060156", Enum.AnimationPriority.Action, true),
+		spindashRelease = loadAnimation("119889021060156", Enum.AnimationPriority.Action, true),
+		jump = loadAnimation("119889021060156", Enum.AnimationPriority.Action, true),
+		thok = loadAnimation("119889021060156", Enum.AnimationPriority.Action, true),
+		skydive = loadAnimation("70951390614197", Enum.AnimationPriority.Action, true),
+		runFast = loadAnimation("17172918855", Enum.AnimationPriority.Core, true),
+		runFaster = loadAnimation("75752382380063", Enum.AnimationPriority.Core, true),
+		runStop = loadAnimation("75503979822317", Enum.AnimationPriority.Core, false),
+	}
+
+	local sounds = {
+		runStop = loadSound("138935700510140"),
+		spindashCharge = loadSound("6606602837"),
+		spindashRelease = loadSound("88921486254759"),
+		thok = loadSound("88921486254759"),
+		jump = loadSound("8620459552"),
+		taunt = loadSound("110408941959293"),
+	}
+	sounds.taunt.Looped = false
+	sounds.taunt.Volume = 3
+
+	local function setFloating(enabled)
+		if enabled and not isFloating then
+			activeBodyForce.Force = Vector3.new(0, gravityForce, 0)
+			isFloating = true
+		elseif not enabled and isFloating then
+			activeBodyForce.Force = Vector3.zero
+			isFloating = false
+		end
+	end
+
+	local function resetThok()
+		if activeBodyForce and activeBodyForce:FindFirstChild("ThokVelocity") then
+			activeBodyForce.ThokVelocity:Destroy()
+		end
+		state.isThokking = false
+	end
+
+	local function jump()
+		if state.isChargingSpindash or state.isSkydiving then return end
+		rootPart.AssemblyLinearVelocity = Vector3.new(rootPart.AssemblyLinearVelocity.X, math.sqrt(147.15 * config.jumpHeight), rootPart.AssemblyLinearVelocity.Z)
+		humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+		sounds.jump:Play()
+		state.canThok = true
+		setFloating(true)
+		state.jumpCount = 0
+	end
+
+	local function thok()
+		if state.isChargingSpindash or state.isSkydiving then return end
+		local jumpPower = math.sqrt(147.15 * config.jumpHeight) * config.thokBoost
+		local lookVector = rootPart.CFrame.LookVector * Vector3.new(1, 0, 1)
+		lookVector = (lookVector.Magnitude == 0 and Vector3.new(rootPart.AssemblyLinearVelocity.X, 0, rootPart.AssemblyLinearVelocity.Z).Unit or lookVector.Unit)
+		local finalY = math.max(jumpPower, rootPart.AssemblyLinearVelocity.Y)
+		local forwardVel = lookVector * config.thokForwardForce
+		rootPart.AssemblyLinearVelocity = Vector3.new(forwardVel.X, finalY, forwardVel.Z)
+		rootPart.CFrame = CFrame.new(rootPart.Position, rootPart.Position + lookVector)
+		humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+		sounds.jump:Play()
+		setFloating(true)
+		state.thokCount = 0
+	end
+
+	local function airDash()
+		if state.isDashing or state.isSkydiving then return end
+		state.canThok = false
+		state.isDashing = true
+		state.isThokking = true
+		state.thokCount = 0
+		local bodyVelocity = Instance.new("BodyVelocity", rootPart)
+		bodyVelocity.Name = "ThokVelocity"
+		bodyVelocity.Velocity = rootPart.CFrame.LookVector * Vector3.new(1, 0, 1).Unit * config.thokVelocity + Vector3.new(0, 200, 0)
+		bodyVelocity.MaxForce = Vector3.new(math.huge, 1, math.huge)
+		if not animations.thok.IsPlaying then
+			animations.thok:Play()
+			animations.thok:AdjustSpeed(5)
+		end
+		sounds.thok:Play()
+		task.defer(function() task.delay(config.thokAirtime, resetThok) end)
+		setFloating(true)
+	end
+
+	local function cancelAirDash()
+		local vel = rootPart.AssemblyLinearVelocity
+		if vel.Y > 0 and not activeBodyForce:FindFirstChild("ThokVelocity") and vel.Y > 10 then
+			rootPart.AssemblyLinearVelocity = Vector3.new(vel.X, vel.Y * 0.35, vel.Z)
+		end
+		state.isJumping = false
+	end
+
+	local function handleJumpRequest(isPressed)
+		if not character or not character.Parent or state.isSkydiving then return end
+		state.isJumping = isPressed
+		local isGrounded = humanoid.FloorMaterial ~= Enum.Material.Air
+		if isPressed then
+			if state.isChargingSpindash then return end
+			if isGrounded then
+				if state.jumpCount < config.jumpCountMax then
+					jump()
+					state.lastJumpTime = tick()
+				elseif not state.isDashing and state.canThok then
+					airDash()
+				elseif state.isDashing and state.thokCount < config.thokCountMax then
+					thok()
+				else
+					cancelAirDash()
+				end
+			end
+		end
+	end
+
+	local function loadTauntAnimation(id)
+		local anim = Instance.new("Animation")
+		anim.AnimationId = id
+		local track = animator:LoadAnimation(anim)
+		track.Priority = Enum.AnimationPriority.Action
+		track.Looped = true
+		anim.Parent = animator
+		return track
+	end
+
+	local function playTaunt()
+		if state.isChargingSpindash or state.isDashing or humanoid.FloorMaterial == Enum.Material.Air or state.isSkydiving then return end
+		if activeTauntAnimation then activeTauntAnimation:Stop() end
+		isTaunting = true
+		currentTauntIndex = (currentTauntIndex % #tauntAnimationIDs) + 1
+		activeTauntAnimation = loadTauntAnimation(tauntAnimationIDs[currentTauntIndex])
+		if not activeTauntAnimation then
+			isTaunting = false
+			return
+		end
+		sounds.taunt:Play()
+		task.defer(function()
+			if activeTauntAnimation and isTaunting then
+				activeTauntAnimation:Play()
+			end
+		end)
+	end
+
+	local function handleSpindashCharge()
+		if humanoid.FloorMaterial == Enum.Material.Air and not state.isDashing and not humanoid.PlatformStand and not state.isSpinLocked and not state.isSkydiving and not Workspace:Raycast(rootPart.Position, Vector3.new(0, -3.5, 0), raycastParams) then
+			state.isSkydiving = true
+			humanoid.PlatformStand = true
+			if animations.skydive.IsPlaying then animations.skydive:Stop() end
+			animations.skydive:Play()
+			activeBodyForce.Force = Vector3.new(0, -stompForce, 0)
+			isFloating = true
+			resetThok()
+			if animations.jump.IsPlaying then animations.jump:Stop() end
+			if animations.thok.IsPlaying then animations.thok:Stop() end
+			if rootPart.AssemblyLinearVelocity.Y > 0 then
+				rootPart.AssemblyLinearVelocity = Vector3.new(rootPart.AssemblyLinearVelocity.X, -50, rootPart.AssemblyLinearVelocity.Z)
+			end
+			return
+		end
+		if humanoid.FloorMaterial == Enum.Material.Air or state.isDashing or humanoid.PlatformStand or state.isSpinLocked or state.isSkydiving then return end
+		state.lastSpindashChargeTime = tick()
+		task.delay(config.spindashMinCharge, function()
+			if tick() - state.lastSpindashChargeTime >= config.spindashMinCharge and not state.isDashing and not state.isSpinLocked then
+				state.isChargingSpindash = true
+				humanoid.WalkSpeed = 0.1
+				animations.spindashCharge:Play()
+				animations.spindashCharge:AdjustSpeed(config.spindashChargeSpeed)
+				sounds.spindashCharge:Play()
+			end
+		end)
+	end
+
+	local function handleSpindashRelease()
+		if state.isSkydiving then return end
+		if humanoid.FloorMaterial == Enum.Material.Air then return end
+		local chargeDuration = tick() - state.lastSpindashChargeTime
+		if chargeDuration < config.spindashMinCharge and not state.isChargingSpindash then
+			local lookVector = (rootPart.CFrame.LookVector * Vector3.new(1, 0, 1)).Unit
+			local currentSpeed = Vector3.new(rootPart.AssemblyLinearVelocity.X, 0, rootPart.AssemblyLinearVelocity.Z).Magnitude
+			local newSpeed = currentSpeed + config.spindashForceSmall
+			humanoid.WalkSpeed = newSpeed
+			local moveDir = humanoid.MoveDirection.Magnitude > 0 and humanoid.MoveDirection.Unit or lookVector
+			rootPart.AssemblyLinearVelocity = moveDir * newSpeed + Vector3.new(0, rootPart.AssemblyLinearVelocity.Y, 0)
+			state.isDashing = true
+			state.isSpinLocked = true
+			animations.spindashRelease:Play()
+			animations.spindashRelease:AdjustSpeed(config.spindashSpeedAdjustSmall)
+			sounds.spindashRelease:Play()
+			task.defer(function()
+				task.delay(0.2, function()
+					if state.isDashing then state.isDashing = false end
+					state.isSpinLocked = false
+					if animations.spindashRelease.IsPlaying then animations.spindashRelease:Stop() end
+				end)
+			end)
+			return
+		end
+		if state.isChargingSpindash then
+			state.isChargingSpindash = false
+			if animations.spindashCharge.IsPlaying then animations.spindashCharge:Stop() end
+			humanoid.WalkSpeed = defaultWalkSpeed
+			local force, duration, speedAdjust
+			if chargeDuration < config.spindashDurationMedium then
+				force = math.min(config.spindashForceMedium * (1 + chargeDuration / 0.8 * 3), config.spindashForceMedium)
+				duration = config.spindashDurationMedium
+				speedAdjust = config.spindashSpeedAdjustMedium
+			elseif chargeDuration < config.spindashDurationLarge then
+				force = config.spindashForceLarge
+				duration = config.spindashDurationLarge
+				speedAdjust = config.spindashSpeedAdjustLarge
+			else
+				force = config.spindashForceLarge
+				duration = config.spindashDurationLarge
+				speedAdjust = config.spindashSpeedAdjustLarge
+			end
+			rootPart.AssemblyLinearVelocity = (rootPart.CFrame.LookVector * Vector3.new(1, 0, 1)).Unit * force + Vector3.new(0, rootPart.AssemblyLinearVelocity.Y, 0)
+			humanoid.WalkSpeed = defaultWalkSpeed
+			state.isSpinLocked = true
+			state.isDashing = true
+			animations.spindashRelease:Play()
+			animations.spindashRelease:AdjustSpeed(speedAdjust)
+			sounds.spindashRelease:Play()
+			task.defer(function()
+				task.delay(duration, function()
+					if state.isDashing then
+						state.isDashing = false
+						humanoid.WalkSpeed = humanoid.MoveDirection.Magnitude > 0 and defaultWalkSpeed or baseWalkSpeed
+					end
+					state.isSpinLocked = false
+				end)
+			end)
+			task.defer(function()
+				task.delay(0.5, function()
+					if animations.spindashRelease.IsPlaying then animations.spindashRelease:Stop() end
+				end)
+			end)
+		end
+	end
+
+	characterConnections.spinDown = spinButton.MouseButton1Down:Connect(handleSpindashCharge)
+	characterConnections.spinUp = spinButton.MouseButton1Up:Connect(handleSpindashRelease)
+	characterConnections.jumpDown = jumpButton.MouseButton1Down:Connect(function() handleJumpRequest(true) end)
+	characterConnections.jumpUp = jumpButton.MouseButton1Up:Connect(function() handleJumpRequest(false) end)
+	characterConnections.tauntClick = tauntButton.MouseButton1Click:Connect(playTaunt)
+
+	characterConnections.inputBegan = UserInputService.InputBegan:Connect(function(input, gameProcessed)
+		if gameProcessed then return end
+		if input.KeyCode == Enum.KeyCode.E then handleSpindashCharge() end
+		if input.KeyCode == Enum.KeyCode.Space or input.KeyCode == Enum.KeyCode.ButtonA then handleJumpRequest(true) end
+		if input.KeyCode == Enum.KeyCode.T then playTaunt() end
+	end)
+
+	characterConnections.inputEnded = UserInputService.InputEnded:Connect(function(input, gameProcessed)
+		if gameProcessed then return end
+		if input.KeyCode == Enum.KeyCode.E then handleSpindashRelease() end
+		if input.KeyCode == Enum.KeyCode.Space or input.KeyCode == Enum.KeyCode.ButtonA then handleJumpRequest(false) end
+	end)
+
+	activeDiedConnection = humanoid.Died:Connect(function()
+		if activeTauntAnimation then activeTauntAnimation:Stop() end
+		isTaunting = false
+		if activeTrail then activeTrail:Destroy() activeTrail = nil end
+	end)
+
+	activeTrail = createTrail(lowerTorso, config.trailColor, 0.5, 1, 0.5)
+
+	activeRenderStepped = RunService.RenderStepped:Connect(function(dt)
+		if not rootPart or not humanoid or not character.Parent then
+			if activeRenderStepped and activeRenderStepped.Connected then
+				activeRenderStepped:Disconnect()
+			end
+			return
+		end
+
+		local isGrounded = humanoid.FloorMaterial ~= Enum.Material.Air
+		local isMoving = humanoid.MoveDirection.Magnitude > 0.01
+		local horizontalVelocity = (rootPart.AssemblyLinearVelocity * Vector3.new(1, 0, 1)).Magnitude
+
+		if state.isSkydiving then
+			if Workspace:Raycast(rootPart.Position, Vector3.new(0, -4.5, 0), raycastParams) or isGrounded then
+				state.isSkydiving = false
+				humanoid.PlatformStand = false
+				humanoid.AutoRotate = true
+				if animations.skydive.IsPlaying then animations.skydive:Stop() end
+				setFloating(false)
+				rootPart.AssemblyLinearVelocity = Vector3.zero
+			else
+				humanoid.PlatformStand = true
+				local lookVector = (rootPart.CFrame.LookVector * Vector3.new(1, 0, 1)).Unit
+				local sideForce = rootPart:GetMass() * 15
+				activeBodyForce.Force = Vector3.new(-lookVector.X * sideForce, -stompForce, -lookVector.Z * sideForce)
+				local yVel = rootPart.AssemblyLinearVelocity.Y
+				if isMoving then
+					local moveVel = humanoid.MoveDirection * 200
+					rootPart.AssemblyLinearVelocity = Vector3.new(moveVel.X, yVel, moveVel.Z)
+					rootPart.CFrame = CFrame.new(rootPart.Position, rootPart.Position + humanoid.MoveDirection)
+				else
+					rootPart.AssemblyLinearVelocity = Vector3.new(0, yVel, 0)
+				end
+			end
+		end
+
+		activeTrail.Enabled = horizontalVelocity > config.trailSpeedThreshold and not state.isChargingSpindash
+
+		if isGrounded then
+			if state.isSkydiving then
+				state.isSkydiving = false
+				humanoid.PlatformStand = false
+				humanoid.AutoRotate = true
+				if animations.skydive.IsPlaying then animations.skydive:Stop() end
+				setFloating(false)
+			end
+			if humanoid.WalkSpeed > defaultWalkSpeed then
+				humanoid.WalkSpeed = math.max(humanoid.WalkSpeed - config.runDecel * dt, defaultWalkSpeed)
+			end
+			if not state.isChargingSpindash and not humanoid.PlatformStand then
+				humanoid.WalkSpeed = isMoving and math.min(humanoid.WalkSpeed + config.runAccel * dt, defaultWalkSpeed) or baseWalkSpeed
+			end
+			if isMoving and not state.isThokking and not state.isSpinLocked and not humanoid.PlatformStand then
+				if humanoid.MoveDirection.Magnitude > 0.001 then
+					local moveForce = humanoid.MoveDirection * humanoid.WalkSpeed
+					rootPart.AssemblyLinearVelocity = Vector3.new(moveForce.X, rootPart.AssemblyLinearVelocity.Y, moveForce.Z)
+					rootPart.CFrame = CFrame.new(rootPart.Position, rootPart.Position + humanoid.MoveDirection)
+				end
+			end
+		elseif isMoving and not state.isThokking and not state.isSpinLocked and not state.isSkydiving then
+			rootPart.AssemblyLinearVelocity = rootPart.AssemblyLinearVelocity + humanoid.MoveDirection * humanoid.WalkSpeed * config.airAccel * dt
+			local airVel = rootPart.AssemblyLinearVelocity * Vector3.new(1, 0, 1)
+			if airVel.Magnitude > config.maxAirSpeed then
+				rootPart.AssemblyLinearVelocity = Vector3.yAxis * rootPart.AssemblyLinearVelocity.Y + airVel.Unit * config.maxAirSpeed
+			end
+			rootPart.CFrame = CFrame.new(rootPart.Position, rootPart.Position + humanoid.MoveDirection)
+		end
+
+		if isGrounded then
+			if not isMoving and horizontalVelocity > config.runSoundThreshold and tick() - state.lastRunSoundTime > config.runSoundCooldown then
+				state.lastJumpTime = tick()
+				state.lastRunSoundTime = tick()
+				sounds.runStop:Play()
+				if not animations.runStop.IsPlaying then animations.runStop:Play() end
+			end
+			if animations.runStop.IsPlaying and isMoving then animations.runStop:Stop() end
+			if not isMoving and horizontalVelocity < config.runSoundThreshold and animations.runStop.IsPlaying then animations.runStop:Stop() end
+		end
+
+		local function setAnimPlaying(anim, shouldPlay)
+			if shouldPlay and not anim.IsPlaying then anim:Play()
+			elseif not shouldPlay and anim.IsPlaying then anim:Stop() end
+		end
+
+		if state.isSkydiving then
+			setAnimPlaying(animations.idle, false)
+			setAnimPlaying(animations.run, false)
+			setAnimPlaying(animations.walk, false)
+			setAnimPlaying(animations.jump, false)
+		elseif not state.isChargingSpindash and isGrounded then
+			if isMoving then
+				setAnimPlaying(animations.walk, false)
+				if horizontalVelocity >= config.sprintSpeedThreshold then
+					setAnimPlaying(animations.idle, false)
+					setAnimPlaying(animations.run, true)
+					config.currentSprintAnimSpeed = math.min(config.currentSprintAnimSpeed + config.sprintAnimAccel * dt, config.sprintAnimSpeedMax)
+					animations.run:AdjustSpeed(config.currentSprintAnimSpeed)
+				else
+					setAnimPlaying(animations.run, false)
+					setAnimPlaying(animations.idle, true)
+					animations.idle:AdjustSpeed(0.8 + math.clamp((horizontalVelocity - 4) / (config.runSoundThreshold - 4), 0, 1) * 1.4)
+					config.currentSprintAnimSpeed = config.sprintAnimSpeedMin
+				end
+			else
+				setAnimPlaying(animations.idle, false)
+				setAnimPlaying(animations.run, false)
+				config.currentSprintAnimSpeed = config.sprintAnimSpeedMin
+			end
+		end
+
+		if isTaunting and humanoid.MoveDirection.Magnitude > 0.02 then
+			if activeTauntAnimation then activeTauntAnimation:Stop() end
+			isTaunting = false
+		end
+
+		local targetFov = (humanoid.WalkSpeed > defaultWalkSpeed and isMoving) or state.isSkydiving and config.cameraMaxFov or config.cameraBaseFov
+		local camera = Workspace.CurrentCamera
+		if camera then
+			camera.FieldOfView = camera.FieldOfView + (targetFov - camera.FieldOfView) * config.cameraFovLerp
+			if camera.CameraSubject == rootPart and rootPart.AssemblyLinearVelocity.Magnitude > config.cameraZoomThreshold then
+				camera.CFrame = camera.CFrame:Lerp(rootPart.CFrame * CFrame.new(0, 5, -config.cameraZoomDistance), 1 - config.cameraZoomLerp)
+			end
+		end
+	end)
+
+	characterConnections.stateChanged = humanoid.StateChanged:Connect(function(old, new)
+		if new == Enum.HumanoidStateType.Jumping or new == Enum.HumanoidStateType.Freefall then
+			if not animations.jump.IsPlaying and not state.isSkydiving then animations.jump:Play() end
+			setFloating(true)
+		elseif new == Enum.HumanoidStateType.Landed then
+			humanoid.PlatformStand = false
+			state.isThokking = false
+			state.isJumping = false
+			state.canThok = true
+			state.isDashing = false
+			state.jumpCount = 0
+			state.thokCount = 0
+			if state.isSkydiving then
+				state.isSkydiving = false
+				humanoid.PlatformStand = false
+				humanoid.AutoRotate = true
+				if animations.skydive.IsPlaying then animations.skydive:Stop() end
+				setFloating(false)
+				rootPart.AssemblyLinearVelocity = Vector3.zero
+			end
+			if state.isDashing then
+				state.isDashing = false
+				humanoid.WalkSpeed = defaultWalkSpeed
+			end
+			resetThok()
+			if animations.jump.IsPlaying then animations.jump:Stop() end
+			if animations.thok.IsPlaying then animations.thok:Stop() end
+			if animations.runStop.IsPlaying then animations.runStop:Stop() end
+		end
+	end)
+end
+
+connections.characterAdded = LocalPlayer.CharacterAdded:Connect(setupCharacterController)
+if LocalPlayer.Character then
+	task.defer(setupCharacterController, LocalPlayer.Character)
+end
+
+StarterGui:SetCore("SendNotification", {
+	Title = "Credits",
+	Text = "Made by JasPlague",
+	Duration = 5,
+})
+
+local controlsGui = Instance.new("ScreenGui", LocalPlayer:WaitForChild("PlayerGui"))
+controlsGui.Name = "ControlsPopup"
+controlsGui.ResetOnSpawn = false
+
+local mainFrame = Instance.new("Frame", controlsGui)
+mainFrame.Size = UDim2.new(0, 350, 0, 250)
+mainFrame.Position = UDim2.new(0.5, 0, 0.5, 0)
+mainFrame.AnchorPoint = Vector2.new(0.5, 0.5)
+mainFrame.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+mainFrame.BorderColor3 = Color3.fromRGB(0, 0, 0)
+Instance.new("UICorner", mainFrame)
+
+local titleLabel = Instance.new("TextLabel", mainFrame)
+titleLabel.Size = UDim2.new(1, 0, 0.2, 0)
+titleLabel.Text = "-- Made By JasPlague --"
+titleLabel.TextScaled = true
+titleLabel.Font = Enum.Font.ArialBold
+titleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+titleLabel.BackgroundColor3 = Color3.fromRGB(75, 160, 255)
+
+local infoLabel = Instance.new("TextLabel", mainFrame)
+infoLabel.Size = UDim2.new(1, -20, 0.6, -20)
+infoLabel.Position = UDim2.new(0.5, 0, 0.5, 10)
+infoLabel.AnchorPoint = Vector2.new(0.5, 0.5)
+infoLabel.TextXAlignment = Enum.TextXAlignment.Left
+infoLabel.TextYAlignment = Enum.TextYAlignment.Top
+infoLabel.Font = Enum.Font.ArialBold
+infoLabel.TextSize = 18
+infoLabel.TextWrapped = true
+infoLabel.BackgroundTransparency = 1
+infoLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+infoLabel.Text = "Hold (E)/Spin Button to spindash\nSpam (E)/Spin Button to speed up infinitely/ Skydive when in air\nPress (Spacebar)/Jump Button to jump and hold to jump higher\nSpam (Spacebar)/Jump Button to Thok or air jump\nPress (T)/Taunt button to Taunt\nChange musics by clicking the Music cycle or mute"
+
+local okButton = Instance.new("TextButton", mainFrame)
+okButton.Size = UDim2.new(0.4, 0, 0.15, 0)
+okButton.Position = UDim2.new(0.5, 0, 1, -10)
+okButton.AnchorPoint = Vector2.new(0.5, 1)
+okButton.Text = "OK"
+okButton.TextScaled = true
+okButton.Font = Enum.Font.ArialBold
+okButton.BackgroundColor3 = Color3.fromRGB(75, 160, 255)
+okButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+Instance.new("UICorner", okButton)
+
+okButton.Activated:Connect(function()
+	controlsGui:Destroy()
+end)
